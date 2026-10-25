@@ -76,6 +76,63 @@ public struct ESClient: Sendable {
         return envelope.data ?? []
     }
 
+    // MARK: Audio download (issue 09)
+
+    /// One call hides the whole download chain (notes/04): the signed-URL POST
+    /// with the standard legacy headers, matching the response entry by
+    /// (region, gcsKey), the auth-free GCS V4 GET, and exactly ONE internal
+    /// re-sign-and-retry when GCS answers 403 (expired signature — signUrls
+    /// live ~1 h and are never persisted). GCS 404 (object gone) and transport
+    /// failures surface as `httpStatus`/`requestFailed`.
+    public func downloadAudio(for file: CardFile) async throws -> Data {
+        do {
+            return try await fetchAuthFree(try await signedURL(for: file))
+        } catch ESError.httpStatus(403, _, _) {
+            return try await fetchAuthFree(try await signedURL(for: file))
+        }
+    }
+
+    /// POST `storage/card/v1/files` — plaintext JSON (no write envelope) with
+    /// the same three auth headers as every legacy call, strict on the code
+    /// like `fetchCardPage`.
+    private func signedURL(for file: CardFile) async throws -> URL {
+        let body = try JSONEncoder().encode(CardFilesRequest(files: [file]))
+        let (data, http) = try await performRecords(
+            path: "storage/card/v1/files",
+            httpMethod: "POST",
+            body: body
+        )
+        let envelope = try decode(LegacyEnvelope<[SignedCardFileWire]>.self, from: data, http: http)
+        guard envelope.code == "00000" else {
+            throw ESError.httpStatus(http.statusCode, code: envelope.code, message: envelope.msg)
+        }
+        guard let entry = (envelope.data ?? [])
+            .first(where: { $0.region == file.region && $0.gcsKey == file.gcsKey }),
+              let signString = entry.signUrl,
+              let signURL = URL(string: signString)
+        else {
+            throw ESError.invalidResponse(
+                "storage/card/v1/files returned no signed URL for \(file.gcsKey ?? "?") in \(file.region ?? "?")"
+            )
+        }
+        return signURL
+    }
+
+    /// Plain GET on a server-signed GCS URL. MUST NOT go through
+    /// perform/performRecords — they attach Authorization, which GCS rejects;
+    /// the V4 signature is in the URL itself.
+    private func fetchAuthFree(_ url: URL) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        let (data, http) = try await send(request)
+        guard (200..<300).contains(http.statusCode) else {
+            // 401 has already passed send()'s refresh passthrough; for GCS it
+            // is simply a failure like any other status.
+            throw ESError.httpStatus(http.statusCode, code: nil, message: String(data: data, encoding: .utf8))
+        }
+        return data
+    }
+
     // MARK: Request plumbing
 
     /// Sends with the given Access Token; on 401 refreshes once and retries with the new
@@ -172,3 +229,15 @@ public struct ESClient: Sendable {
 
 /// Decoding helper for envelopes whose `data` we do not model.
 private struct EmptyData: Decodable {}
+
+/// Request body of `storage/card/v1/files` (notes/04): plaintext JSON.
+private struct CardFilesRequest: Encodable {
+    let files: [CardFile]
+}
+
+/// One `data` entry of the `storage/card/v1/files` response.
+private struct SignedCardFileWire: Decodable {
+    let region: String?
+    let gcsKey: String?
+    let signUrl: String?
+}
