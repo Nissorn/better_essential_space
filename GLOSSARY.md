@@ -31,6 +31,22 @@ _Avoid_: item, entry
 **Collection**:
 A user-named group of Cards on the legacy storage backend.
 
+**Sign URL**:
+The short-lived Google Cloud Storage V4 download URL the legacy backend issues for a Card's cloud file via `storage/card/v1/files`; downloading it needs no further auth. One per (region, gcsKey) request.
+_Avoid_: signed URL (hyphenation), presigned URL, download URL
+
+**gcsKey**:
+The cloud-file path of a Card's audio resource (`audioRequest/<md5(account uuid)>/<cardId>/<resourceId>.aac`), paired with its `region` (`asia-south1`/`europe-west3`). The keys to request a Sign URL with.
+_Avoid_: GCS key, storage key, file path
+
+**Write Envelope**:
+The encrypted wrapper every legacy-host write request carries: `payload` (AES-256-ECB-PKCS7 of the deviceId, or of the per-card size) plus `cipherKey` (the base64 AES key wrapped with RSA-PKCS1v15 under the Claim Key). Card text itself travels in cleartext inside `cards[]`.
+_Avoid_: payload (bare — ambiguous with the card text), encryption layer
+
+**Claim Key**:
+The RSA-2048 public key (`ConfigUtil.getClaimKey()`, runtime secret) that wraps Write Envelope AES keys. Public key only — any client can wrap its own key with it.
+_Avoid_: API key (that is the legacy `auth`-header key), signing key
+
 ## Account & login
 
 **Nothing Account**:
