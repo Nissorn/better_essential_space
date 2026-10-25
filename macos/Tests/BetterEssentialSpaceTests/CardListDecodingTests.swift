@@ -81,6 +81,7 @@ final class CardListDecodingTests: XCTestCase {
         XCTAssertEqual(first.audioDurationMS, 119_000)
         XCTAssertEqual(first.audioSizeBytes, 1_234_567)
         XCTAssertEqual(first.createdAt, Date(epochMilliseconds: 1_700_000_000_001))
+        XCTAssertEqual(first.collectionIds, ["60000000-0000-4000-8000-000000000001"])
 
         // Main topics, emotional summary, speakers (card_analysis / meeting_speakers).
         XCTAssertEqual(first.mainTopics.map(\.title), ["Synthetic Topic One", "Synthetic Topic Two"])
@@ -98,6 +99,7 @@ final class CardListDecodingTests: XCTestCase {
         let second = try XCTUnwrap(records.first { $0.id == "10000000-0000-4000-8000-000000000002" })
         XCTAssertNil(second.transcript)
         XCTAssertEqual(second.audioDurationMS, 30_000)
+        XCTAssertEqual(second.collectionIds, [])
 
         // Card 3: null summary decodes to nil; plain-string main-topic metadata
         // (fallback) still yields a topic with no content.

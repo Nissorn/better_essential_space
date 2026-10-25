@@ -14,6 +14,12 @@ final class AppModelTests: XCTestCase {
     nonisolated static let accountUUID = "00000000-1111-2222-3333-444444444444"
     nonisolated static let deviceID = "aaaa0000-0000-4000-8000-000000000000"
 
+    /// One card cross-referenced to the route's Collection (70000000-…-00a);
+    /// `count` on the server side says 0, so the local cross-ref must win.
+    nonisolated static let collectedCardPageJSON = """
+    {"code":"00000","msg":"success","data":{"page_no":1,"page_size":20,"hasNextPage":false,"page_data":[{"cardId":"10000000-0000-4000-8000-000000000009","client_request_response":"{\\"cards\\":{\\"card_id\\":\\"10000000-0000-4000-8000-000000000009\\",\\"title\\":\\"Collected Record\\",\\"summary\\":null,\\"type\\":\\"RECORDING\\",\\"create_time\\":1700000000000,\\"update_time\\":1700000000001},\\"card_resources\\":[],\\"card_collection_cross_ref\\":[{\\"collection_id\\":\\"70000000-0000-4000-8000-00000000000a\\"}]}","clientCreateTime":1700000000000,"clientUpdateTime":1700000000001}]}}
+    """
+
     override func setUp() {
         super.setUp()
         keychain = TestSupport.testKeychain()
@@ -100,6 +106,12 @@ final class AppModelTests: XCTestCase {
                 json: #"{"access_token":"\#(TestJWT.token(uuid: accountUUID, expiresAt: Date(timeIntervalSinceNow: 3600)))","refresh_token":"rt_new","device_secret":"ds_new"}"#
             )
         }
+        if url.contains("collection/v1/list") {
+            return MockURLProtocol.ok(
+                request.url,
+                json: #"{"code":"00000","msg":"success","data":[{"collectionId":"70000000-0000-4000-8000-00000000000a","collectionName":"Conference Collection","count":0,"clientUpdateTime":1,"clientCreateTime":2}]}"#
+            )
+        }
         if host == "essential-space.nothingtech.link" {
             return MockURLProtocol.ok(
                 request.url,
@@ -132,6 +144,30 @@ final class AppModelTests: XCTestCase {
         }
         XCTAssertNotNil(model.preferences, "content loads once the phase turns ready")
         XCTAssertNil(model.lastError)
+    }
+
+    func testCollectionsLoadAndLocalCountBeatsStaleServerCount() async throws {
+        MockURLProtocol.setHandler { request in
+            if request.url?.absoluteString.contains("card/v1/list") == true {
+                return MockURLProtocol.ok(request.url, json: Self.collectedCardPageJSON)
+            }
+            return Self.route(request, otpAction: "finished", tokenStatus: 200)
+        }
+
+        await model.logIn(email: "user@example.com", password: "hunter2")
+        XCTAssertEqual(model.phase, .ready)
+
+        for _ in 0..<100 where model.collections.isEmpty || model.records.isEmpty {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(model.collections.map(\.name), ["Conference Collection"])
+        XCTAssertEqual(model.records.count, 1)
+        // The server reported count:0; the loaded card's cross-ref is the truth.
+        XCTAssertEqual(model.recordCount(in: try XCTUnwrap(model.collections.first)), 1)
+        XCTAssertEqual(model.filteredRecords(collectionID: "70000000-0000-4000-8000-00000000000a").count, 1)
+        XCTAssertEqual(model.filteredRecords(collectionID: nil).count, 1)
+        XCTAssertEqual(model.filteredRecords(collectionID: "unknown-collection").count, 0)
+        XCTAssertEqual(model.collectionNames(for: try XCTUnwrap(model.records.first)), ["Conference Collection"])
     }
 
     func testTrustedDeviceLoginSkipsOTPEntirely() async throws {

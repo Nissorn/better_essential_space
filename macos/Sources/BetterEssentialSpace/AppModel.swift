@@ -27,6 +27,7 @@ final class AppModel {
 
     private(set) var phase: Phase = .loading
     private(set) var records: [Record] = []
+    private(set) var collections: [CollectionSummary] = []
     private(set) var preferences: Preferences?
     private(set) var sessionOverview: SessionOverview?
     private(set) var lastError: String?
@@ -83,6 +84,7 @@ final class AppModel {
     func signOut() {
         accountSession.clearTokens()
         records = []
+        collections = []
         preferences = nil
         sessionOverview = nil
         lastError = nil
@@ -165,6 +167,7 @@ final class AppModel {
     func loadAll() async {
         await loadPreferences()
         await loadRecords()
+        await loadCollections()
     }
 
     func loadRecords() async {
@@ -199,6 +202,45 @@ final class AppModel {
         }
     }
 
+    /// Collections are secondary like preferences — only a dead session surfaces.
+    /// Oldest-created first, so the sidebar keeps creation order.
+    func loadCollections() async {
+        do {
+            try Task.checkCancellation()
+            collections = try await client.fetchCollections().sorted {
+                ($0.clientCreateTime ?? 0, $0.collectionId ?? "")
+                    < ($1.clientCreateTime ?? 0, $1.collectionId ?? "")
+            }
+        } catch is CancellationError {
+            // superseded by a newer load
+        } catch {
+            if isSessionExpired(error) { handle(error) }
+        }
+    }
+
+    // MARK: Collections
+
+    /// Records of one Collection (nil = all). Membership comes from each Card's
+    /// `card_collection_cross_ref` (notes/03).
+    func filteredRecords(collectionID: String?) -> [Record] {
+        guard let collectionID else { return records }
+        return records.filter { $0.collectionIds.contains(collectionID) }
+    }
+
+    /// The count shown on a Collection: cross-refs of the loaded Records, falling
+    /// back to the server's own count (observed stale in the capture).
+    func recordCount(in collection: CollectionSummary) -> Int {
+        guard let id = collection.collectionId else { return 0 }
+        let local = records.count { $0.collectionIds.contains(id) }
+        return local > 0 ? local : (collection.count ?? 0)
+    }
+
+    func collectionNames(for record: Record) -> [String] {
+        record.collectionIds.compactMap { id in
+            collections.first { $0.collectionId == id }?.name
+        }
+    }
+
     // MARK: Internals
 
     private func refreshSessionOverview() {
@@ -221,6 +263,7 @@ final class AppModel {
         if isSessionExpired(error) {
             accountSession.clearTokens()
             records = []
+            collections = []
             preferences = nil
             sessionOverview = nil
             phase = .needsToken((error as? ESError)?.errorDescription)

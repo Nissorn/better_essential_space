@@ -50,6 +50,17 @@ public struct CardFile: Decodable, Equatable, Sendable {
     public let gcsKey: String?
 }
 
+/// One `card_collection_cross_ref` entry: a Collection this Card belongs to.
+public struct CardCollectionCrossRef: Decodable, Equatable, Sendable {
+    public let collectionId: String?
+    public let createTime: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case collectionId = "collection_id"
+        case createTime = "create_time"
+    }
+}
+
 /// Payload decoded from `Card.clientRequestResponse` (the second decode step).
 /// Unknown sibling keys are ignored.
 public struct CardPayload: Decodable, Equatable, Sendable {
@@ -58,12 +69,15 @@ public struct CardPayload: Decodable, Equatable, Sendable {
     /// AI analysis of the recording: main topics, emotional summary, … (notes/03).
     public let cardAnalysis: [CardAnalysis]?
     public let meetingSpeakers: [MeetingSpeaker]?
+    /// The Collections this Card belongs to (notes/03 § Collections).
+    public let cardCollectionCrossRefs: [CardCollectionCrossRef]?
 
     enum CodingKeys: String, CodingKey {
         case cards
         case cardResources = "card_resources"
         case cardAnalysis = "card_analysis"
         case meetingSpeakers = "meeting_speakers"
+        case cardCollectionCrossRefs = "card_collection_cross_ref"
     }
 }
 
@@ -214,11 +228,16 @@ public struct CollectionSummary: Decodable, Equatable, Sendable {
     public let collectionId: String?
     public let name: String?
     public let count: Int?
+    /// Server-maintained epochs; used for ordering (the wire sends them per capture).
+    public let clientCreateTime: Int64?
+    public let clientUpdateTime: Int64?
 
     public enum CodingKeys: String, CodingKey {
         case collectionId
         case name = "collectionName"
         case count
+        case clientCreateTime
+        case clientUpdateTime
     }
 }
 
@@ -258,6 +277,8 @@ public struct Record: Identifiable, Equatable, Sendable {
     /// One-line tone summary (`MEETING_EMOTIONAL_SUMMARY`, a plain string).
     public let emotionalSummary: String?
     public let speakers: [MeetingSpeaker]
+    /// The Collections this Record belongs to (from the Card's cross-refs).
+    public let collectionIds: [String]
 
     /// All main topics as numbered plain-text blocks ("1. Title\ncontent"), for copying.
     public var mainTopicsText: String {
@@ -314,6 +335,9 @@ public struct Record: Identifiable, Equatable, Sendable {
         mainTopics = topics
         emotionalSummary = emotional
         speakers = (payload.meetingSpeakers ?? []).filter { !($0.description ?? "").isEmpty }
+        collectionIds = (payload.cardCollectionCrossRefs ?? [])
+            .compactMap(\.collectionId)
+            .filter { !$0.isEmpty }
     }
 
     /// `metadata` is `{"title": …, "content": …}` (or `detailed_summary`); a plain

@@ -101,6 +101,37 @@ final class ESClientTests: XCTestCase {
         XCTAssertEqual(bodyObject as? [String: Int], ["page_no": 2, "page_size": 5, "sinceTime": 0])
     }
 
+    func testFetchCollectionsPostsSinceTimeZero() async throws {
+        try signIn()
+        let capturedRequest = Locked<URLRequest?>(nil)
+        MockURLProtocol.setHandler { request in
+            capturedRequest.set(request)
+            return MockURLProtocol.ok(
+                request.url,
+                json: #"{"code":"00000","msg":"success","data":[{"collectionId":"70000000-0000-4000-8000-00000000000a","collectionName":"Synthetic Collection","count":2,"clientUpdateTime":2,"clientCreateTime":1}]}"#
+            )
+        }
+
+        let collections = try await client.fetchCollections()
+        XCTAssertEqual(collections, [
+            CollectionSummary(
+                collectionId: "70000000-0000-4000-8000-00000000000a",
+                name: "Synthetic Collection",
+                count: 2,
+                clientCreateTime: 1,
+                clientUpdateTime: 2
+            )
+        ])
+
+        let request = try XCTUnwrap(capturedRequest.get())
+        XCTAssertEqual(request.url?.absoluteString, "https://essential-space.nothingtech.link/essentialSpace/storage/collection/v1/list")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertNotNil(request.value(forHTTPHeaderField: "auth"))
+        XCTAssertNotNil(request.value(forHTTPHeaderField: "timestamp"))
+        let body = try XCTUnwrap(String(data: request.bodyStreamData ?? request.httpBody ?? Data(), encoding: .utf8))
+        XCTAssertEqual(body, #"{"sinceTime":0}"#)
+    }
+
     func testFetchCardPageWithoutLegacyKeyFailsWithTypedError() async throws {
         try signIn()
         let keylessClient = ESClient(

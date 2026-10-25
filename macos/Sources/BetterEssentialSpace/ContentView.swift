@@ -8,26 +8,45 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openSettings) private var openSettings
     @State private var selection: Record.ID?
+    @State private var selectedCollectionID: String?
+
+    private var visibleRecords: [Record] {
+        model.filteredRecords(collectionID: selectedCollectionID)
+    }
 
     var body: some View {
         NavigationSplitView {
-            List(model.records, selection: $selection) { record in
-                RecordRow(record: record, isSelected: selection == record.id)
-                    .tag(record.id)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
+            VStack(spacing: 0) {
+                if !model.collections.isEmpty {
+                    collectionsBar
+                }
+                List(visibleRecords, selection: $selection) { record in
+                    RecordRow(record: record, isSelected: selection == record.id)
+                        .tag(record.id)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .overlay {
+                    if visibleRecords.isEmpty {
+                        ContentUnavailableView(
+                            selectedCollectionID == nil ? "No Records" : "Empty Collection",
+                            systemImage: "waveform",
+                            description: Text(
+                                selectedCollectionID == nil
+                                    ? "Records appear here once the account's Essential Space has synced voice captures."
+                                    : "This Collection has no Records."
+                            )
+                        )
+                    }
+                }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
             .navigationTitle("Records")
-            .overlay {
-                if model.records.isEmpty {
-                    ContentUnavailableView(
-                        "No Records",
-                        systemImage: "waveform",
-                        description: Text("Records appear here once the account's Essential Space has synced voice captures.")
-                    )
+            .onChange(of: selectedCollectionID) {
+                if let id = selection, !visibleRecords.contains(where: { $0.id == id }) {
+                    selection = nil
                 }
             }
             .toolbar {
@@ -41,7 +60,7 @@ struct ContentView: View {
         } detail: {
             Group {
                 if let record = model.records.first(where: { $0.id == selection }) {
-                    RecordDetail(record: record)
+                    RecordDetail(record: record, collectionNames: model.collectionNames(for: record))
                 } else {
                     ContentUnavailableView(
                         "Select a Record",
@@ -55,6 +74,76 @@ struct ContentView: View {
         .navigationTitle("Better Essential Space")
         .navigationSplitViewStyle(.balanced)
         .appCanvas()
+    }
+
+    /// The phone app's COLLECTIONS section, adapted to a horizontal chip bar:
+    /// "All Records" plus one chip per Collection with its Record count.
+    private var collectionsBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("COLLECTIONS")
+                .font(ND.mono(12, weight: .medium))
+                .foregroundStyle(ND.textTertiary)
+                .padding(.horizontal, 14)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    CollectionChip(
+                        title: "All Records",
+                        count: model.records.count,
+                        isSelected: selectedCollectionID == nil
+                    ) { selectedCollectionID = nil }
+                    ForEach(model.collections, id: \.collectionId) { collection in
+                        CollectionChip(
+                            title: collection.name ?? "Untitled Collection",
+                            count: model.recordCount(in: collection),
+                            isSelected: selectedCollectionID == collection.collectionId
+                        ) { selectedCollectionID = collection.collectionId }
+                    }
+                }
+                .padding(.horizontal, 14)
+            }
+        }
+        .padding(.top, 10)
+        .padding(.bottom, 4)
+    }
+}
+
+/// One sidebar Collection chip: gradient fill + white label when selected,
+/// surface + hairline border when not.
+private struct CollectionChip: View {
+    let title: String
+    let count: Int
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(ND.ui(13, weight: .semibold))
+                Text("\(count)")
+                    .font(ND.mono(12))
+                    .monospacedDigit()
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.7) : ND.textTertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .foregroundStyle(isSelected ? Color.white : ND.textPrimary)
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(ND.accentGradient)
+                } else {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(ND.surface)
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(isSelected ? Color.clear : ND.surfaceBorder, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -115,6 +204,7 @@ struct RecordRow: View {
 
 struct RecordDetail: View {
     let record: Record
+    var collectionNames: [String] = []
 
     @State private var transcriptExpanded = false
 
@@ -243,6 +333,11 @@ struct RecordDetail: View {
             }
             .font(ND.mono(12))
             .foregroundStyle(ND.textTertiary)
+            if !collectionNames.isEmpty {
+                Text(collectionNames.joined(separator: "  ·  "))
+                    .font(ND.mono(12))
+                    .foregroundStyle(ND.textSecondary)
+            }
             if let mood = record.emotionalSummary, !mood.isEmpty {
                 Text(mood)
                     .font(ND.ui(14))
