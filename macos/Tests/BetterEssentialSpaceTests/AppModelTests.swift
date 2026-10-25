@@ -11,6 +11,7 @@ final class AppModelTests: XCTestCase {
     private var keychain: KeychainStore!
     private var model: AppModel!
     private var cacheURL: URL!
+    private var audioDirectory: URL!
 
     nonisolated static let accountUUID = "00000000-1111-2222-3333-444444444444"
     nonisolated static let deviceID = "aaaa0000-0000-4000-8000-000000000000"
@@ -27,6 +28,8 @@ final class AppModelTests: XCTestCase {
         // Tests never touch the user's real Application Support cache.
         cacheURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("model-cache-\(UUID().uuidString).json")
+        audioDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("model-audio-\(UUID().uuidString)", isDirectory: true)
         MockURLProtocol.setHandler { request in
             Self.route(request, otpAction: "verify", tokenStatus: 200)
         }
@@ -47,7 +50,8 @@ final class AppModelTests: XCTestCase {
                 urlSession: MockURLProtocol.makeSession(),
                 legacyKeyProvider: { "dummy-legacy-key" }
             ),
-            cacheURL: cacheURL
+            cacheURL: cacheURL,
+            audioStore: AudioStore(directory: audioDirectory)
         )
     }
 
@@ -57,6 +61,7 @@ final class AppModelTests: XCTestCase {
         keychain?.delete(account: DeviceIdentity.KeychainAccount.key)
         keychain?.delete(account: DeviceIdentity.KeychainAccount.registration)
         try? FileManager.default.removeItem(at: cacheURL)
+        try? FileManager.default.removeItem(at: audioDirectory)
         super.tearDown()
     }
 
@@ -322,5 +327,116 @@ final class AppModelTests: XCTestCase {
         await model.logIn(email: "user@example.com", password: "hunter2")
         model.cancelLogin()
         XCTAssertEqual(model.loginStage, .idle)
+    }
+
+    // MARK: Audio downloads (issue 09)
+
+    private func signInWithToken() throws {
+        try model.accountSession.storeTokens(
+            TokenSet(
+                accessToken: TestJWT.token(uuid: Self.accountUUID, expiresAt: Date(timeIntervalSinceNow: 3600)),
+                idToken: nil,
+                refreshToken: "rt",
+                deviceSecret: nil
+            )
+        )
+    }
+
+    /// Serves the sign POST + GCS GET pair with controllable delays, status,
+    /// and a counter on sign requests. The signed gcsKey matches the fixture
+    /// Record's audio file.
+    private func serveAudioDownload(
+        signDelay: Double = 0,
+        gcsDelay: Double = 0,
+        gcsStatus: Locked<Int>? = nil,
+        bytes: Data,
+        signCount: Locked<Int>? = nil
+    ) throws {
+        let record = try Self.fixtureRecord()
+        let gcsKey = record.audioFile?.gcsKey ?? ""
+        let signURLString = "https://storage.googleapis.com/test-bucket/audio?X-Goog-Signature=synthetic"
+        let signJSON = #"{"code":"00000","msg":"success","data":[{"region":"asia-south1","gcsKey":"\#(gcsKey)","signUrl":"\#(signURLString)"}]}"#
+        MockURLProtocol.setHandler { request in
+            if request.url?.path.contains("storage/card/v1/files") == true {
+                if let signCount { _ = signCount.with { $0 += 1 } }
+                if signDelay > 0 { Thread.sleep(forTimeInterval: signDelay) }
+                return MockURLProtocol.ok(request.url, json: signJSON)
+            }
+            if let gcsStatus, gcsStatus.get() != 200 {
+                return MockURLProtocol.error(request.url, status: gcsStatus.get(), json: "<Error/>")
+            }
+            if gcsDelay > 0 { Thread.sleep(forTimeInterval: gcsDelay) }
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!,
+                bytes
+            )
+        }
+    }
+
+    func testConcurrentAudioDownloadsShareOneSignRequest() async throws {
+        try signInWithToken()
+        let record = try Self.fixtureRecord()
+        let signCount = Locked(0)
+        let bytes = Data("synthetic-mp4".utf8)
+        try serveAudioDownload(signDelay: 0.15, bytes: bytes, signCount: signCount)
+
+        let library = model.audio
+        async let first: URL = library.ensureDownloaded(record)
+        async let second: URL = library.ensureDownloaded(record)
+        let (urlA, urlB) = try await (first, second)
+
+        XCTAssertEqual(urlA, urlB)
+        XCTAssertEqual(signCount.get(), 1, "two callers for one gcsKey share a single sign+download")
+        XCTAssertEqual(model.audio.state(for: record), .ready(urlA))
+        XCTAssertEqual(try Data(contentsOf: urlA), bytes)
+    }
+
+    func testAudioDiskHitShortCircuitsTheNetwork() async throws {
+        let record = try Self.fixtureRecord()
+        let cached = try AudioStore(directory: audioDirectory)
+            .store(Data("already-here".utf8), gcsKey: record.audioFile!.gcsKey!)
+        MockURLProtocol.setHandler { _ in
+            XCTFail("a disk hit must not touch the network")
+            return MockURLProtocol.error(nil, status: 500, json: "{}")
+        }
+
+        let url = try await model.audio.ensureDownloaded(record)
+        XCTAssertEqual(url, cached)
+        XCTAssertEqual(model.audio.state(for: record), .ready(cached))
+    }
+
+    func testAudioFailureStateOffersRetry() async throws {
+        try signInWithToken()
+        let record = try Self.fixtureRecord()
+        let gcsStatus = Locked(404)
+        try serveAudioDownload(gcsStatus: gcsStatus, bytes: Data("x".utf8))
+
+        do {
+            _ = try await model.audio.ensureDownloaded(record)
+            XCTFail("expected the download to fail")
+        } catch {}
+
+        guard case .failed(let message) = model.audio.state(for: record) else {
+            return XCTFail("expected .failed, got \(model.audio.state(for: record))")
+        }
+        XCTAssertTrue(message.contains("no longer available"), "user-presentable wording, got: \(message)")
+
+        gcsStatus.set(200)
+        let url = try await model.audio.ensureDownloaded(record)
+        XCTAssertEqual(model.audio.state(for: record), .ready(url))
+    }
+
+    func testAudioDownloadStateSurvivesSelectionChange() async throws {
+        try signInWithToken()
+        let record = try Self.fixtureRecord()
+        try serveAudioDownload(gcsDelay: 0.2, bytes: Data("slow-bytes".utf8))
+
+        let download = Task { try await model.audio.ensureDownloaded(record) }
+        try await Task.sleep(nanoseconds: 50_000_000) // let it reach the network
+
+        // Navigating away must not cancel or corrupt the in-flight download.
+        XCTAssertEqual(model.audio.state(for: record), .downloading)
+        let url = try await download.value
+        XCTAssertEqual(model.audio.state(for: record), .ready(url))
     }
 }

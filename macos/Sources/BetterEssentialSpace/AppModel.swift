@@ -42,6 +42,9 @@ final class AppModel {
     }
 
     let accountSession: AccountSession
+    /// Download orchestration for Record audio (issue 09). Lives as long as the
+    /// model so downloads survive selection changes; states are keyed by gcsKey.
+    let audio: AudioLibrary
     private let client: ESClient
     private let authflow: AuthflowClient
     private let cacheURL: URL
@@ -52,12 +55,15 @@ final class AppModel {
         accountSession: AccountSession = AccountSession(),
         authflow: AuthflowClient = AuthflowClient(),
         client: ESClient? = nil,
-        cacheURL: URL = RecordCache.defaultURL
+        cacheURL: URL = RecordCache.defaultURL,
+        audioStore: AudioStore = AudioStore()
     ) {
         self.accountSession = accountSession
+        let resolvedClient = client ?? ESClient(accountSession: accountSession)
+        self.client = resolvedClient
         self.authflow = authflow
-        self.client = client ?? ESClient(accountSession: accountSession)
         self.cacheURL = cacheURL
+        self.audio = AudioLibrary(client: resolvedClient, store: audioStore)
     }
 
     // MARK: Bootstrap (token import -> Keychain -> authenticated fetches)

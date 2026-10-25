@@ -315,12 +315,19 @@ struct RecordDetail: View {
     let record: Record
     var collectionNames: [String] = []
 
+    @Environment(AppModel.self) private var model
     @State private var transcriptExpanded = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+
+                if record.audioFile != nil {
+                    card("Audio") {
+                        AudioCardView(record: record, library: model.audio)
+                    }
+                }
 
                 if !record.mainTopics.isEmpty {
                     card("Main topic") {
