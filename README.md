@@ -21,17 +21,15 @@ An unofficial, **read-only** macOS client for Nothing's Essential Space: sign in
 
 ## Build & run
 
-Clone this repo, then:
-
 ```zsh
-cd macos
+git clone https://github.com/Nissorn/better_essential_space.git
+cd better_essential_space/macos
 ./scripts/build-app.sh    # -> dist/BetterEssentialSpace.app (ad-hoc signed)
 ```
 
 or from source during development:
 
 ```zsh
-cd macos
 swift run                 # needs DEVELOPER_DIR pointed at Xcode
 swift test                # full suite; no network (URLProtocol mocks)
 ```
