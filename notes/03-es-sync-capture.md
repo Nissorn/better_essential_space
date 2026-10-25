@@ -78,6 +78,16 @@ Facts established:
 
 Conclusion for v1: transcripts are fully served by the card list alone; **audio playback deferred** (explicitly allowed by spec Q13). Follow-up hypotheses for a later issue: Firebase Storage rules requiring Play Integrity/App Check attestation; download-token URLs; recorder-app dependency on-device; or authenticated Cognito identities for S3.
 
+### Update (2026-10-25, later session): the cloud copy is upload-only — playback is local, audio playback is not feasible today
+
+Decompiled `EssentialRecorder.apk` (`apks/ntessentialrecorder/` → `apks/ntessentialrecorder/jadx-out/`) and re-audited the ES app; this closes the follow-up hypotheses above:
+
+- **ES app `FirebaseUtil` is upload-only** (`notes/jadx/.../util/FirebaseUtil.java`): `uploadFile`/`putFile` plus upload-session resume bookkeeping (`findFastestLocationWithLatency` even uploads a latency-probe file `upload_test.dat`). No `getFile`/`getDownloadUrl` call exists anywhere outside the coil3 image loader.
+- **Recorder app has no download path either**: its only network call is `essentialVoice/ai/v1/transcription` (`network/NetworkApi.java`); no Firebase Storage, no cloud restore, no audio fetch. Playback = the ES app binds `com.nothing.ntessentialrecorder/.MainService2`, which plays the **local recording file** — which is exactly why the emulator (no recorder app installed, no local files) sat at 0:00 with zero network attempts, and why the user's real phone plays fine.
+- Combined with the earlier finding that a valid Firebase idToken still gets 403 on `?alt=media` and metadata reads, the picture is: **no Nothing client ever downloads audio from Firebase Storage**. The rules deny client reads; there is no working request to replicate.
+
+Verdict: audio playback in a third-party client is **not feasible today** — the blocker is not attestation we could mimic, it is that no download path exists in the ecosystem. Re-open only if Nothing ships a downloading client (a web player, restore-on-new-phone, multi-device sync) or relaxes the rules; then capture that client's request and replicate.
+
 ## What the macOS client needs (summary for issues 02-03)
 
 - Two hosts: legacy `essential-space.nothingtech.link/essentialSpace/` (records: card/collection/category list) and `prod.essentialsearch.essential-nt.com` (preferences; memories list = AI memory bank, currently empty for this account).
