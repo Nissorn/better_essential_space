@@ -1,0 +1,50 @@
+{
+  "code": "00000",
+  "msg": "success",
+  "data": {
+    "page_no": 1,
+    "page_size": 20,
+    "hasNextPage": false,
+    "page_data": [
+      {
+        "cardId": "10000000-0000-4000-8000-000000000001",
+        "client_request_response": "{\"cards\":{\"card_id\":\"10000000-0000-4000-8000-000000000001\",\"title\":\"Synthetic Record One\",\"summary\":\"A fully synthetic summary used only as a decoder fixture.\",\"type\":\"RECORDING\",\"create_time\":1700000000001,\"update_time\":1700000100001,\"resource_mask\":1028},\"card_resources\":[{\"card_resource_id\":\"20000000-0000-4000-8000-000000000001\",\"raw_type\":\"RECORDING\",\"data\":\"\",\"mime_type\":\"audio/aac\",\"is_primary\":true,\"create_time\":1700000000000,\"update_time\":1700000000000,\"remote_gcsKey\":\"audioRequest/db41be7278059497304a7a408a6c303d/10000000-0000-4000-8000-000000000001/20000000-0000-4000-8000-000000000001.aac\",\"remote_region\":\"asia-south1\",\"metadata\":\"{\\\"size\\\": 1234567, \\\"duration\\\": 119000, \\\"start_time\\\": 1700000000000, \\\"end_time\\\": 1700000119000}\"},{\"card_resource_id\":\"30000000-0000-4000-8000-000000000001\",\"raw_type\":\"TRANSCRIPTION\",\"data\":\"Synthetic transcript one. This sentence is generated text with no origin in any real recording. Second sentence checks multiline handling.\",\"mime_type\":\"text/plain\",\"is_primary\":false,\"create_time\":1700000000000,\"update_time\":1700000000000,\"remote_gcsKey\":\"\",\"remote_region\":\"\",\"parent_id\":\"20000000-0000-4000-8000-000000000001\"}],\"card_analysis\":[{\"card_analysis_id\":\"40000000-0000-4000-8000-000000000001\",\"raw_type\":\"MEETING_MAIN_TOPIC\",\"metadata\":\"{\\\"title\\\": \\\"Synthetic Topic One\\\", \\\"content\\\": \\\"Synthetic content for the first main topic.\\\"}\"},{\"card_analysis_id\":\"40000000-0000-4000-8000-000000000002\",\"raw_type\":\"MEETING_MAIN_TOPIC\",\"metadata\":\"{\\\"title\\\": \\\"Synthetic Topic Two\\\", \\\"content\\\": \\\"Synthetic content for the second main topic.\\\"}\"},{\"card_analysis_id\":\"40000000-0000-4000-8000-000000000003\",\"raw_type\":\"MEETING_EMOTIONAL_SUMMARY\",\"metadata\":\"Synthetic one-line tone summary.\"}],\"meeting_speakers\":[{\"meeting_speakers_id\":\"50000000-0000-4000-8000-000000000001\",\"speaker_id\":\"Speaker 1\",\"description\":\"A synthetic speaker description.\"}],\"card_collection_cross_ref\":[{\"collection_id\":\"60000000-0000-4000-8000-000000000001\",\"create_time\":1700000100000}]}",
+        "files": [
+          {
+            "region": "asia-south1",
+            "gcsKey": "audioRequest/db41be7278059497304a7a408a6c303d/10000000-0000-4000-8000-000000000001/20000000-0000-4000-8000-000000000001.aac"
+          }
+        ],
+        "clientCreateTime": 1700000000001,
+        "clientUpdateTime": 1700000100001,
+        "clientVersion": 2
+      },
+      {
+        "cardId": "10000000-0000-4000-8000-000000000002",
+        "client_request_response": "{\"cards\": {\"card_id\": \"10000000-0000-4000-8000-000000000002\", \"title\": \"Synthetic Record Two\", \"summary\": \"Synthetic summary two; transcript still processing.\", \"type\": \"RECORDING\", \"create_time\": 1700000000002, \"update_time\": 1700000100002, \"resource_mask\": 1028}, \"card_resources\": [{\"card_resource_id\": \"20000000-0000-4000-8000-000000000002\", \"raw_type\": \"RECORDING\", \"data\": \"\", \"mime_type\": \"audio/aac\", \"is_primary\": true, \"create_time\": 1700000000000, \"update_time\": 1700000000000, \"remote_gcsKey\": \"audioRequest/db41be7278059497304a7a408a6c303d/10000000-0000-4000-8000-000000000002/20000000-0000-4000-8000-000000000002.aac\", \"remote_region\": \"asia-south1\", \"metadata\": \"{\\\"size\\\": 250000, \\\"duration\\\": 30000, \\\"start_time\\\": 1700002000000, \\\"end_time\\\": 1700002030000}\"}], \"card_analysis\": [], \"meeting_speakers\": [], \"card_collection_cross_ref\": []}",
+        "files": [
+          {
+            "region": "asia-south1",
+            "gcsKey": "audioRequest/db41be7278059497304a7a408a6c303d/10000000-0000-4000-8000-000000000002/20000000-0000-4000-8000-000000000002.aac"
+          }
+        ],
+        "clientCreateTime": 1700000000002,
+        "clientUpdateTime": 1700000100002,
+        "clientVersion": 2
+      },
+      {
+        "cardId": "10000000-0000-4000-8000-000000000003",
+        "client_request_response": "{\"cards\":{\"card_id\":\"10000000-0000-4000-8000-000000000003\",\"title\":\"Synthetic Record Three\",\"summary\":null,\"type\":\"RECORDING\",\"create_time\":1700000000003,\"update_time\":1700000100003,\"resource_mask\":1028},\"card_resources\":[{\"card_resource_id\":\"20000000-0000-4000-8000-000000000003\",\"raw_type\":\"RECORDING\",\"data\":\"\",\"mime_type\":\"audio/aac\",\"is_primary\":true,\"create_time\":1700000000000,\"update_time\":1700000000000,\"remote_gcsKey\":\"audioRequest/db41be7278059497304a7a408a6c303d/10000000-0000-4000-8000-000000000003/20000000-0000-4000-8000-000000000003.aac\",\"remote_region\":\"asia-south1\",\"metadata\":\"{\\\"size\\\": 42, \\\"duration\\\": 1, \\\"start_time\\\": 1700003000000, \\\"end_time\\\": 1700003000001}\"},{\"card_resource_id\":\"30000000-0000-4000-8000-000000000003\",\"raw_type\":\"TRANSCRIPTION\",\"data\":\"Synthetic transcript three.\",\"mime_type\":\"text/plain\",\"is_primary\":false,\"create_time\":1700000000000,\"update_time\":1700000000000,\"remote_gcsKey\":\"\",\"remote_region\":\"\",\"parent_id\":\"20000000-0000-4000-8000-000000000003\"}],\"card_analysis\":[{\"card_analysis_id\":\"40000000-0000-4000-8000-000000000004\",\"raw_type\":\"MEETING_MAIN_TOPIC\",\"metadata\":\"Plain string topic title\"}],\"meeting_speakers\":[],\"card_collection_cross_ref\":[]}",
+        "files": [
+          {
+            "region": "asia-south1",
+            "gcsKey": "audioRequest/db41be7278059497304a7a408a6c303d/10000000-0000-4000-8000-000000000003/20000000-0000-4000-8000-000000000003.aac"
+          }
+        ],
+        "clientCreateTime": 1700000000003,
+        "clientUpdateTime": 1700000100003,
+        "clientVersion": 2
+      }
+    ]
+  }
+}

@@ -35,6 +35,8 @@ curl "https://prod.essentialsearch.essential-nt.com/preferences" \
 
 Verified header matrix on `memories/list`: Bearer+Account-ID → **200**; drop either → 401. The token ES itself sends is exactly this token (`User.nothingToken` == the OAuth `access_token`, confirmed by Frida hooking `i96$a.a(User)` in ES and comparing JWT claims), and `defpackage/ag.java` adds only `Authorization`, `X-Nothing-Account-ID`, `Content-Type`, `timestamp` — no signature, no device attestation on this host.
 
+✅ **RESOLVED (2026-10-25 session 3) — records are Cards on the legacy host; the 401s were a missing `auth` header, not a wrong token.** Full findings, verified read recipe, and the `auth = md5(apiKey + timestamp)` header scheme: **notes/03-es-sync-capture.md**. (Original hypotheses (a) was correct; (b) and (c) were eliminated by the phone screenshot + JWT uuid match.)
+
 Endpoints on the new host (from `MemoriesApiService.java`, `UserPreferencesService.java`, `ProcessMemoryService.java`; `@ou3`=POST, `@x02`=GET):
 
 | Method | Path | Purpose |
@@ -117,7 +119,7 @@ Unknown (updated 2026-10-25 session 2):
 3. `fetchKey2`/`fetchKey3` semantics (likely Cognito/Amplify or signing keys for writes) — values captured in this session, purpose unconfirmed. Cognito pool IDs / Amplify config — `ConfigUtil.getAPS1/getEUW3/getApiKey` are **native** methods whose strings in `libconfig-lib.so` are encrypted at rest.
 4. Write-path requirements on the new host (`memories/update|delete`, `process_memory`): body schema (`v86`/`x41`/`t04` gson models) and whether they need `fetchKey2/3`-derived signatures — untested (read-only goal for now).
 5. The RSA public key for the legacy write encryption and whether it rotates.
-6. Whether the legacy `essentialSpace/` host serves any consumer with an SSO token (Smart Center?) — irrelevant for the macOS client.
+6. Whether the legacy `essentialSpace/` host serves consumers with an SSO token — **reopened 2026-10-25**: if the account's records live there (see the open question in the SOLVED section), the macOS client needs that token path after all.
 
 ## Request signing — CRACKED (verified against live captures, 2026-10-25)
 
@@ -136,28 +138,36 @@ KEY = see `secrets/spoof_and_sign.py` (gitignored; embedded Nothing account-app 
 
 (Extraction method: hooking `Hmac::Hmac`/`Hmac::convert` with Frida using blutter's symbol map, verified byte-for-byte against a live capture.)
 
+**Per-endpoint enforcement (from capture analysis, 2026-10-25):** `x-app-signature` rides on every `/api/v2/*` request the app makes. On top of that, the device-bound POSTs (`authflow/login`, `authflow/login/state/input`, `oauth2/token`) **require** `x-device-signature` — the genuine app sent `authflow/login` without it (because `device/report` had never succeeded) and got `403 "Missing required header(s): X-Device-Signature"`. `authorize` instead carries `x-idp-session`; bare `GET /api` probes go unsigned and are still served. `x-device-signature` signs with the EC P-256 private key whose `public_key` was uploaded in `device/report` — keypair generated client-side per device, so a native client can mint its own with CryptoKit.
+
+**`x-device-signature` scheme — CRACKED (2026-10-25, verified against all 3 signed requests in `captures/nothing-login2.flow` with the uploaded public key):**
+
+```
+signPayload = "<x-timestamp epoch ms>" + "." + <raw request body string>   // no hashing, no nonce, no path
+signature   = base64UrlWithPadding( ECDSA-P256-SHA256( utf8(signPayload) ) as P1363 r||s 64 bytes )
+```
+
+Evidence: User Center Dart AOT (blutter `/tmp/uc_blutter`), `NacNetConfigInterceptor::_injectDeviceHeadersIfNeeded` builds `"$timestamp.$serializeBodyForSigning(body)"`, `NacDeviceKeyManager::sign` → `_encodeP1363` (r and s each padded to 32 bytes) → `base64Url.encode` (keeps `=` padding). The DER variant (`_signWithKey` → `_encodeDer`) is only for key-rotation payloads. The `public_key` in `device/report` is SPKI DER, base64 (91 bytes = 26-byte ASN.1 header + 65-byte `0x04||X||Y`).
+
 Device risk gate: `POST /api/v2/device/report` is judged purely on the self-reported JSON (`is_emulator`, `device_model`, `hardware`…). With a spoofed body + re-signed payload the server returns `200 {"device_id": "...", "next_key_rotation_at": "..."}` — the "Security issue detected" login block comes from this report, and is fully bypassed. Working mitmproxy addon: `secrets/spoof_and_sign.py` (gitignored; run `mitmdump -w captures/<name>.flow -s secrets/spoof_and_sign.py`).
 
 ## Login protocol — captured live (2026-10-25, email+OTP login on the emulator)
 
-**1. Authorize** (browser/WebView flow):
-```
-GET https://account.nothing.tech/api/v2/oauth2/authorize
-    ?response_type=code
-    &client_id=account-app-native
-    &redirect_uri=nothing-account-app://oauth2/callback
-    &scope=openid profile email offline_access
-    &state=<43 random>
-    &code_challenge_method=S256&code_challenge=<43 random>
-```
+**The entire login is native HTTP (`User-Agent: Dart/3.9 (dart:io)`) — the app never opens a browser or WebView.** Full wire order (verified against `captures/nothing-login2.flow`, 2026-10-25 capture analysis):
 
-**2. Token exchange** (form-encoded):
+1. **Device report** — `POST /api/v2/device/report` with the device-field JSON (`identifier`, `platform:"ANDROID"`, `device_model`, `is_emulator`, …) plus a base64 **EC P-256 `public_key`** → `{"device_id":"<uuid>","next_key_rotation_at":"..."}`. The client signs later auth requests with the matching private key (`x-device-signature`). An honest `is_emulator:true` body → `403 "Device is an emulator"` (this was the entire emulator block).
+2. **Authflow login** — `POST /api/v2/authflow/login` body `{"input":{"identification":"email","login_id":"<email>","password":"<pw>"}}` → `{"state_token":"statetoken_…","action":{"type":"verify","data":{OTP challenge, masked email, is_device_trusted:false}}}` (new device ⇒ OTP always required).
+3. **OTP submit** — `POST /api/v2/authflow/login/state/input` body `{"state_token":"…","input":{"code":"<6-digit>"}}` → `action.type:"finished"` with `session_id` (`sess_…`).
+4. **Authorize** — plain `GET /api/v2/oauth2/authorize?response_type=code&client_id=account-app-native&redirect_uri=nothing-account-app://oauth2/callback&scope=openid profile email offline_access&state=<43 random>&code_challenge_method=S256&code_challenge=<43 random>` with headers `x-idp-session: <session_id>` + `x-device-id` → `302` whose `Location` is `nothing-account-app://oauth2/callback?code=…&state=…`. The client just parses `code` out of `Location`; the redirect URI is never opened, so a native client needs no URL-scheme registration.
+5. **Token exchange** (form-encoded):
 ```
 POST https://account.nothing.tech/api/v2/oauth2/token
 grant_type=authorization_code&client_id=account-app-native
 &code=<...>&redirect_uri=nothing-account-app://oauth2/callback&code_verifier=<...>
+&x_device_info=<urlencoded base64 JSON of device fields>
 ```
-Response: `access_token` (**JWT, 660 chars, expires_in 2 592 000 s = 30 days**), `refresh_token` (128 chars), `id_token` (JWT, 30 min), `token_type=Bearer`, `scope`, **`device_secret` (ds_…)**.
+(headers include `x-device-signature`; the `x_device_info` form field is not re-validated — a captured exchange succeeded with `is_emulator:true` inside it. Server rejects only what `device/report` claimed.)
+Response: `access_token` (**JWT ~650 chars, HS256, expires_in 2 592 000 s = 30 days**), `refresh_token` (~110 chars), `id_token` (RS256 JWT), `token_type=Bearer`, `scope`, **`device_secret` (ds_… — originates here, NOT from device/report)**.
 
 Access-token JWT claims: `iss=https://account.nothing.tech/api/v2`, `aud=account-app-native`, `sub` (numeric user id), `uuid` (account uuid), `scopes`, `sid` (session), `amr:[pwd,otp]`, **`did=<device_id from device/report>`** — device binding is inside the token. Usage: `Authorization: Bearer <access_token JWT>` (verified live on `/api/auth/me_v2` → 200).
 
