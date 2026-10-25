@@ -14,7 +14,10 @@ let package = Package(
         .executableTarget(
             name: "BetterEssentialSpace",
             dependencies: ["BetterEssentialSpaceCore"],
-            path: "Sources/BetterEssentialSpace"
+            path: "Sources/BetterEssentialSpace",
+            resources: [
+                .copy("Resources")
+            ]
         ),
         .testTarget(
             name: "BetterEssentialSpaceTests",

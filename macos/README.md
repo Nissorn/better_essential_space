@@ -4,7 +4,7 @@ A native macOS client that reads a Nothing account's Essential Space content: vo
 
 ## State
 
-Working (M1 + M2): native email + password + OTP login against Nothing's Authflow (`account.nothing.tech`), automatic token refresh, and Records (title, main topics, summary, date, duration, Transcript inline) + account preferences. The M1 token-file import remains as a fallback on the login screen. Audio playback is deferred (Firebase Storage rejects non-genuine clients for now — notes/03).
+Working (v2): native email + password + OTP login against Nothing's Authflow (`account.nothing.tech`), automatic token refresh, and Records (title, main topics, summary, date, duration, Transcript inline) + account preferences. v2 redesigned the whole UI — scheme-dynamic light/dark tokens with a System/Light/Dark picker in Settings, gradient canvas and accent-gradient buttons, card-based detail, bundled Doto/Geist/Geist Mono (SIL OFL). The M1 token-file import remains as a fallback on the login screen. Audio playback is deferred (Firebase Storage rejects non-genuine clients for now — notes/03).
 
 ## Build & run
 
