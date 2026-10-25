@@ -10,6 +10,7 @@ import XCTest
 final class AppModelTests: XCTestCase {
     private var keychain: KeychainStore!
     private var model: AppModel!
+    private var cacheURL: URL!
 
     nonisolated static let accountUUID = "00000000-1111-2222-3333-444444444444"
     nonisolated static let deviceID = "aaaa0000-0000-4000-8000-000000000000"
@@ -23,6 +24,9 @@ final class AppModelTests: XCTestCase {
     override func setUp() {
         super.setUp()
         keychain = TestSupport.testKeychain()
+        // Tests never touch the user's real Application Support cache.
+        cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("model-cache-\(UUID().uuidString).json")
         MockURLProtocol.setHandler { request in
             Self.route(request, otpAction: "verify", tokenStatus: 200)
         }
@@ -42,7 +46,8 @@ final class AppModelTests: XCTestCase {
                 accountSession: session,
                 urlSession: MockURLProtocol.makeSession(),
                 legacyKeyProvider: { "dummy-legacy-key" }
-            )
+            ),
+            cacheURL: cacheURL
         )
     }
 
@@ -51,6 +56,7 @@ final class AppModelTests: XCTestCase {
         keychain?.delete(account: "session")
         keychain?.delete(account: DeviceIdentity.KeychainAccount.key)
         keychain?.delete(account: DeviceIdentity.KeychainAccount.registration)
+        try? FileManager.default.removeItem(at: cacheURL)
         super.tearDown()
     }
 
@@ -168,6 +174,104 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.filteredRecords(collectionID: nil).count, 1)
         XCTAssertEqual(model.filteredRecords(collectionID: "unknown-collection").count, 0)
         XCTAssertEqual(model.collectionNames(for: try XCTUnwrap(model.records.first)), ["Conference Collection"])
+    }
+
+    // MARK: Offline cache + search (issue 09)
+
+    nonisolated private static func fixtureRecord() throws -> Record {
+        let url = try XCTUnwrap(
+            Bundle.module.url(forResource: "CardListRedacted", withExtension: "json", subdirectory: "Fixtures")
+        )
+        let envelope = try JSONDecoder().decode(LegacyEnvelope<CardListPage>.self, from: Data(contentsOf: url))
+        return try XCTUnwrap(try envelope.data?.pageData.map { try Record(card: $0) }.first)
+    }
+
+    func testBootstrapShowsCachedSnapshotInstantly() throws {
+        try RecordCache.save(
+            CachedSnapshot(
+                accountUUID: Self.accountUUID,
+                savedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                records: [try Self.fixtureRecord()],
+                collections: []
+            ),
+            to: cacheURL
+        )
+        try model.accountSession.storeTokens(
+            TokenSet(
+                accessToken: TestJWT.token(uuid: Self.accountUUID, expiresAt: Date(timeIntervalSinceNow: 3600)),
+                idToken: nil,
+                refreshToken: "rt",
+                deviceSecret: nil
+            )
+        )
+
+        model.bootstrap()
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.records.count, 1, "the snapshot shows before any network round-trip")
+    }
+
+    func testSnapshotOfAnotherAccountIsIgnored() throws {
+        try RecordCache.save(
+            CachedSnapshot(
+                accountUUID: "someone-else",
+                savedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                records: [try Self.fixtureRecord()],
+                collections: []
+            ),
+            to: cacheURL
+        )
+        try model.accountSession.storeTokens(
+            TokenSet(
+                accessToken: TestJWT.token(uuid: Self.accountUUID, expiresAt: Date(timeIntervalSinceNow: 3600)),
+                idToken: nil,
+                refreshToken: "rt",
+                deviceSecret: nil
+            )
+        )
+
+        model.bootstrap()
+        XCTAssertTrue(model.records.isEmpty, "a snapshot must never leak across accounts")
+    }
+
+    func testLoadAllPersistsSnapshotAndSignOutWipesIt() async throws {
+        MockURLProtocol.setHandler { request in
+            Self.route(request, otpAction: "finished", tokenStatus: 200)
+        }
+        await model.logIn(email: "user@example.com", password: "hunter2")
+        for _ in 0..<100 where model.collections.isEmpty {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: cacheURL.path),
+            "loadAll persists the snapshot"
+        )
+
+        model.signOut()
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: cacheURL.path),
+            "sign-out wipes the snapshot from disk"
+        )
+        XCTAssertTrue(model.records.isEmpty)
+    }
+
+    func testVisibleRecordsCombinesCollectionFilterAndSearch() async throws {
+        MockURLProtocol.setHandler { request in
+            if request.url?.absoluteString.contains("card/v1/list") == true {
+                return MockURLProtocol.ok(request.url, json: Self.collectedCardPageJSON)
+            }
+            return Self.route(request, otpAction: "finished", tokenStatus: 200)
+        }
+        await model.logIn(email: "user@example.com", password: "hunter2")
+        for _ in 0..<100 where model.records.isEmpty {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let collection = "70000000-0000-4000-8000-00000000000a"
+        XCTAssertEqual(model.visibleRecords(collectionID: collection, searchQuery: "collected").count, 1)
+        XCTAssertEqual(model.visibleRecords(collectionID: collection, searchQuery: "COLLECTED").count, 1, "case-insensitive")
+        XCTAssertEqual(model.visibleRecords(collectionID: collection, searchQuery: "nothing-matches").count, 0)
+        XCTAssertEqual(model.visibleRecords(collectionID: "other-collection", searchQuery: "collected").count, 0)
+        XCTAssertEqual(model.visibleRecords(collectionID: nil, searchQuery: "   ").count, 1, "whitespace-only query = no filter")
     }
 
     func testTrustedDeviceLoginSkipsOTPEntirely() async throws {

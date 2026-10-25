@@ -1,6 +1,7 @@
 import AppKit
 import BetterEssentialSpaceCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Record list + detail (NavigationSplitView) in the app's design language:
 /// readable type on cards, gradient canvas, accent-marked selection.
@@ -9,14 +10,27 @@ struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
     @State private var selection: Record.ID?
     @State private var selectedCollectionID: String?
+    @State private var searchQuery = ""
+    @FocusState private var searchFocused: Bool
+    @FocusState private var listFocused: Bool
 
     private var visibleRecords: [Record] {
-        model.filteredRecords(collectionID: selectedCollectionID)
+        model.visibleRecords(collectionID: selectedCollectionID, searchQuery: searchQuery)
+    }
+
+    private var selectedRecord: Record? {
+        guard let id = selection else { return nil }
+        return model.records.first { $0.id == id }
+    }
+
+    private var hasActiveSearch: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
+                searchBar
                 if !model.collections.isEmpty {
                     collectionsBar
                 }
@@ -29,26 +43,21 @@ struct ContentView: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .focused($listFocused)
                 .overlay {
                     if visibleRecords.isEmpty {
                         ContentUnavailableView(
-                            selectedCollectionID == nil ? "No Records" : "Empty Collection",
-                            systemImage: "waveform",
-                            description: Text(
-                                selectedCollectionID == nil
-                                    ? "Records appear here once the account's Essential Space has synced voice captures."
-                                    : "This Collection has no Records."
-                            )
+                            emptyStateTitle,
+                            systemImage: hasActiveSearch ? "magnifyingglass" : "waveform",
+                            description: Text(emptyStateDescription)
                         )
                     }
                 }
             }
             .navigationTitle("Records")
-            .onChange(of: selectedCollectionID) {
-                if let id = selection, !visibleRecords.contains(where: { $0.id == id }) {
-                    selection = nil
-                }
-            }
+            .onAppear { listFocused = true }
+            .onChange(of: selectedCollectionID) { clearHiddenSelection() }
+            .onChange(of: searchQuery) { clearHiddenSelection() }
             .toolbar {
                 ToolbarButton(title: "Reload", systemImage: "arrow.clockwise") {
                     model.reload()
@@ -74,6 +83,14 @@ struct ContentView: View {
         .navigationTitle("Better Essential Space")
         .navigationSplitViewStyle(.balanced)
         .appCanvas()
+        .focusedSceneValue(
+            \.recordCommands,
+            RecordCommands(
+                focusSearch: { searchFocused = true },
+                exportAll: model.records.isEmpty ? nil : { exportAllRecords() },
+                exportSelected: selectedRecord == nil ? nil : { exportSelectedRecord() }
+            )
+        )
     }
 
     /// The phone app's COLLECTIONS section, adapted to a horizontal chip bar:
@@ -104,6 +121,98 @@ struct ContentView: View {
         }
         .padding(.top, 10)
         .padding(.bottom, 4)
+    }
+
+    /// Client-side search over every user-visible text field (Record.matches):
+    /// title, summary, Transcript, topics, speakers.
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(ND.mono(12))
+                .foregroundStyle(ND.textTertiary)
+            TextField("Search Records", text: $searchQuery)
+                .textFieldStyle(.plain)
+                .font(ND.ui(14))
+                .focused($searchFocused)
+            if !searchQuery.isEmpty {
+                Button {
+                    searchQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(ND.textTertiary)
+                .help("Clear search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous).fill(ND.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(ND.surfaceBorder, lineWidth: 1)
+        )
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .onExitCommand {
+            if !searchQuery.isEmpty { searchQuery = "" }
+            listFocused = true
+        }
+    }
+
+    private var emptyStateTitle: String {
+        if hasActiveSearch { return "No Results" }
+        return selectedCollectionID == nil ? "No Records" : "Empty Collection"
+    }
+
+    private var emptyStateDescription: String {
+        if hasActiveSearch {
+            return "No Records match “\(searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))”."
+        }
+        if selectedCollectionID == nil {
+            return "Records appear here once the account's Essential Space has synced voice captures."
+        }
+        return "This Collection has no Records."
+    }
+
+    /// A Record hidden by the current Collection filter or search must not stay
+    /// selected in the detail column.
+    private func clearHiddenSelection() {
+        if let id = selection, !visibleRecords.contains(where: { $0.id == id }) {
+            selection = nil
+        }
+    }
+
+    // MARK: Export (File menu + detail copy)
+
+    private func exportAllRecords() {
+        runSavePanel(
+            defaultName: "Essential Space Records.md",
+            content: RecordMarkdown.combined(records: model.records, collections: model.collections)
+        )
+    }
+
+    private func exportSelectedRecord() {
+        guard let record = selectedRecord else { return }
+        runSavePanel(
+            defaultName: RecordMarkdown.fileName(for: record),
+            content: RecordMarkdown.document(for: record, collectionNames: model.collectionNames(for: record))
+        )
+    }
+
+    private func runSavePanel(defaultName: String, content: String) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = defaultName
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try content.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            model.show(error: error)
+        }
     }
 }
 
@@ -277,13 +386,25 @@ struct RecordDetail: View {
 
                 card("Transcript") {
                     if let transcript = record.transcript {
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(transcript, forType: .string)
-                        } label: {
-                            Label("Copy transcript", systemImage: "doc.on.doc")
+                        HStack(spacing: 12) {
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(transcript, forType: .string)
+                            } label: {
+                                Label("Copy transcript", systemImage: "doc.on.doc")
+                            }
+                            .buttonStyle(SecondaryButtonStyle())
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(
+                                    RecordMarkdown.document(for: record, collectionNames: collectionNames),
+                                    forType: .string
+                                )
+                            } label: {
+                                Label("Copy as Markdown", systemImage: "arrow.down.doc")
+                            }
+                            .buttonStyle(SecondaryButtonStyle())
                         }
-                        .buttonStyle(SecondaryButtonStyle())
                         DisclosureGroup(isExpanded: $transcriptExpanded) {
                             Text(transcript)
                                 .font(ND.body)

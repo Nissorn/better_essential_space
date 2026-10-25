@@ -10,6 +10,9 @@ An unofficial, **read-only** macOS client for Nothing's Essential Space: sign in
 - **Native sign-in** — email + password + OTP, the same Authflow the phone app uses. No browser, no token files. Your tokens live in your Mac's Keychain and refresh automatically.
 - **Records** — browse your Essential Space: titles, dates, durations, summaries, main topics, full transcripts.
 - **Collections** — the Collections you made on the phone, with counts and one-click filtering in the sidebar.
+- **Search** — instant, client-side, across every text field of every Record (⌘F).
+- **Export** — Copy as Markdown, or export one Record / everything as `.md` (File menu, ⌘E).
+- **Instant start** — the last snapshot loads immediately and refreshes in the background.
 - **A quiet, readable UI** — adaptive light/dark appearance (System / Light / Dark), gradient accents, Doto + Geist typography, copy-to-clipboard everywhere.
 - **No servers, no telemetry** — the app talks directly to Nothing's endpoints; nothing passes through anyone else's hands.
 

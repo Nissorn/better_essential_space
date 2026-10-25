@@ -44,17 +44,20 @@ final class AppModel {
     let accountSession: AccountSession
     private let client: ESClient
     private let authflow: AuthflowClient
+    private let cacheURL: URL
     private var pendingStateToken: String?
     private var loadTask: Task<Void, Never>?
 
     init(
         accountSession: AccountSession = AccountSession(),
         authflow: AuthflowClient = AuthflowClient(),
-        client: ESClient? = nil
+        client: ESClient? = nil,
+        cacheURL: URL = RecordCache.defaultURL
     ) {
         self.accountSession = accountSession
         self.authflow = authflow
         self.client = client ?? ESClient(accountSession: accountSession)
+        self.cacheURL = cacheURL
     }
 
     // MARK: Bootstrap (token import -> Keychain -> authenticated fetches)
@@ -62,11 +65,23 @@ final class AppModel {
     func bootstrap() {
         refreshSessionOverview()
         if accountSession.isSignedIn {
+            loadCachedSnapshot()
             phase = .ready
             reload()
         } else {
             phase = .needsToken(nil)
         }
+    }
+
+    /// Shows the last snapshot instantly when it belongs to the signed-in
+    /// account; the reload that follows replaces it with fresh data.
+    private func loadCachedSnapshot() {
+        guard records.isEmpty,
+              let snapshot = RecordCache.load(from: cacheURL),
+              snapshot.accountUUID == accountSession.claims?.uuid
+        else { return }
+        records = snapshot.records
+        collections = snapshot.collections
     }
 
     func importTokens(from url: URL) {
@@ -83,6 +98,7 @@ final class AppModel {
 
     func signOut() {
         accountSession.clearTokens()
+        RecordCache.remove(at: cacheURL)
         records = []
         collections = []
         preferences = nil
@@ -168,6 +184,18 @@ final class AppModel {
         await loadPreferences()
         await loadRecords()
         await loadCollections()
+        persistSnapshot()
+    }
+
+    /// Persists the current state for the next launch's instant start. A failed
+    /// load keeps the previous `records`/`collections` in place, so this never
+    /// caches a network failure as empty data.
+    private func persistSnapshot() {
+        guard let accountUUID = accountSession.claims?.uuid else { return }
+        try? RecordCache.save(
+            CachedSnapshot(accountUUID: accountUUID, records: records, collections: collections),
+            to: cacheURL
+        )
     }
 
     func loadRecords() async {
@@ -220,6 +248,17 @@ final class AppModel {
 
     // MARK: Collections
 
+    /// Records as the sidebar shows them: the Collection filter first, then the
+    /// (case-insensitive) search query over every user-visible text field.
+    func visibleRecords(collectionID: String?, searchQuery: String) -> [Record] {
+        var result = filteredRecords(collectionID: collectionID)
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty {
+            result = result.filter { $0.matches(searchQuery: query) }
+        }
+        return result
+    }
+
     /// Records of one Collection (nil = all). Membership comes from each Card's
     /// `card_collection_cross_ref` (notes/03).
     func filteredRecords(collectionID: String?) -> [Record] {
@@ -262,6 +301,7 @@ final class AppModel {
         if error is CancellationError { return }
         if isSessionExpired(error) {
             accountSession.clearTokens()
+            RecordCache.remove(at: cacheURL)
             records = []
             collections = []
             preferences = nil

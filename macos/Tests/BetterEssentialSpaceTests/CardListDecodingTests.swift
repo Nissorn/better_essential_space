@@ -110,6 +110,19 @@ final class CardListDecodingTests: XCTestCase {
         XCTAssertNil(third.mainTopics.first?.content)
     }
 
+    func testSearchMatchesAcrossTextFields() throws {
+        let envelope = try JSONDecoder().decode(LegacyEnvelope<CardListPage>.self, from: fixtureData())
+        let records = try envelope.data!.pageData.map { try Record(card: $0) }
+        let first = try XCTUnwrap(records.first { $0.id == "10000000-0000-4000-8000-000000000001" })
+
+        XCTAssertTrue(first.matches(searchQuery: "synthetic"), "title")
+        XCTAssertTrue(first.matches(searchQuery: "SYNTHETIC"), "case-insensitive")
+        XCTAssertTrue(first.matches(searchQuery: "multiline handling"), "transcript body")
+        XCTAssertTrue(first.matches(searchQuery: "Synthetic Topic Two"), "topic title")
+        XCTAssertTrue(first.matches(searchQuery: "first main topic"), "topic content")
+        XCTAssertFalse(first.matches(searchQuery: "zzz-no-match"))
+    }
+
     func testUnknownInnerKeysAreIgnored() throws {
         // card_collection_cross_ref and any brand-new sibling keys are tolerated.
         let payloadJSON = """

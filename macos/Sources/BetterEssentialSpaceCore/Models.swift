@@ -111,7 +111,7 @@ public struct CardAnalysis: Decodable, Equatable, Sendable {
     }
 }
 
-public struct MeetingSpeaker: Decodable, Equatable, Sendable {
+public struct MeetingSpeaker: Decodable, Encodable, Equatable, Sendable {
     public let speakerId: String?
     public let description: String?
 
@@ -224,7 +224,7 @@ public struct Category: Decodable, Equatable, Sendable {
 /// `{"collectionId","collectionName","count","clientUpdateTime","clientCreateTime"}`.
 /// Every field is optional and unknown keys are ignored so an unexpected schema degrades
 /// instead of crashing decoding.
-public struct CollectionSummary: Decodable, Equatable, Sendable {
+public struct CollectionSummary: Decodable, Encodable, Equatable, Sendable {
     public let collectionId: String?
     public let name: String?
     public let count: Int?
@@ -262,7 +262,8 @@ public struct Preferences: Decodable, Equatable, Sendable {
 // MARK: - Domain model shown in the UI
 
 /// A Record is a voice capture: its title, summary, Transcript, and audio metadata (GLOSSARY).
-public struct Record: Identifiable, Equatable, Sendable {
+/// Codable for the offline snapshot (RecordCache) — not a wire format.
+public struct Record: Identifiable, Equatable, Sendable, Codable {
     public let id: String
     public let title: String
     public let summary: String?
@@ -279,6 +280,22 @@ public struct Record: Identifiable, Equatable, Sendable {
     public let speakers: [MeetingSpeaker]
     /// The Collections this Record belongs to (from the Card's cross-refs).
     public let collectionIds: [String]
+
+    /// True when any user-visible text of this Record contains `query`
+    /// (case-insensitive): title, summary, Transcript, topics, speakers.
+    public func matches(searchQuery query: String) -> Bool {
+        let haystacks: [String?] = [
+            title,
+            summary,
+            transcript,
+            emotionalSummary,
+            mainTopics.map(\.title).joined(separator: "\n"),
+            mainTopics.compactMap(\.content).joined(separator: "\n"),
+            speakers.map { "\( $0.speakerId ?? "") \( $0.description ?? "")" }.joined(separator: "\n"),
+        ]
+        let needle = query.lowercased()
+        return haystacks.compactMap { $0 }.contains { $0.lowercased().contains(needle) }
+    }
 
     /// All main topics as numbered plain-text blocks ("1. Title\ncontent"), for copying.
     public var mainTopicsText: String {
@@ -368,7 +385,7 @@ public struct Record: Identifiable, Equatable, Sendable {
 }
 
 /// One main topic of a Record with its AI-written content.
-public struct MainTopic: Identifiable, Equatable, Sendable {
+public struct MainTopic: Identifiable, Equatable, Sendable, Codable {
     public let id: String
     public let title: String
     public let content: String?
