@@ -1,0 +1,22 @@
+.DS_Store
+
+# Pulled APKs are copyrighted binaries, keep them out of the repo
+apks/
+
+# Reverse-engineering captures must never be committed (contain tokens/cookies)
+captures/
+*.saz
+*.har
+*.mitm
+notes/jadx/
+
+# Secrets & signing
+.env
+secrets/
+*.keystore
+*.jks
+
+# Build outputs
+build/
+DerivedData/
+*.xcodeproj/project.xcworkspace/xcuserdata/
