@@ -319,9 +319,35 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
         }.joined(separator: "\n\n")
     }
 
+    /// The Record as it reads after `edit` — the optimistic local state AND the
+    /// push payload in one value. Re-enters the same `init(card:)` as a fresh
+    /// decode via a synthetic Card, so an edited Record and a decoded Record can
+    /// never diverge in shape; `updatedAt` is stamped to `now`, the same clock
+    /// the update request's `clientUpdateTime` derives from.
+    public func applying(_ edit: CardTextEdit, now: Date = Date()) throws -> Record {
+        let document = try CardDocument(rawJSON: clientRequestResponse).applying(edit)
+        return try Record(
+            card: Card(
+                cardId: id,
+                clientRequestResponse: document.rawJSON,
+                files: files.isEmpty ? nil : files,
+                clientCreateTime: nil,
+                clientUpdateTime: nil,
+                clientVersion: nil
+            ),
+            updatedAtStamp: now
+        )
+    }
+
     /// Double-decodes a Card: the outer JSON, then the JSON-encoded `client_request_response`.
     /// The raw string is retained verbatim alongside its typed projection.
     public init(card: Card) throws {
+        try self.init(card: card, updatedAtStamp: nil)
+    }
+
+    /// The single Card → Record authority. `updatedAtStamp` is the one field an
+    /// edit legitimately owns (see `applying`); every other derivation is shared.
+    init(card: Card, updatedAtStamp: Date?) throws {
         guard let payloadData = card.clientRequestResponse.data(using: .utf8) else {
             throw ESError.invalidResponse("Card \(card.cardId) has an undecodable client_request_response")
         }
@@ -331,7 +357,8 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
         title = payload.cards.title?.isEmpty == false ? payload.cards.title! : "Untitled Record"
         summary = payload.cards.summary
         createdAt = Date(epochMilliseconds: payload.cards.createTime ?? card.clientCreateTime ?? 0)
-        updatedAt = Date(epochMilliseconds: payload.cards.updateTime ?? card.clientUpdateTime ?? 0)
+        updatedAt = updatedAtStamp
+            ?? Date(epochMilliseconds: payload.cards.updateTime ?? card.clientUpdateTime ?? 0)
         clientRequestResponse = card.clientRequestResponse
         files = card.files ?? []
         audioFile = Record.audioFile(of: payload, cardFiles: files)
@@ -412,6 +439,12 @@ public struct MainTopic: Identifiable, Equatable, Sendable, Codable {
     public let id: String
     public let title: String
     public let content: String?
+
+    public init(id: String, title: String, content: String?) {
+        self.id = id
+        self.title = title
+        self.content = content
+    }
 }
 
 extension Date {
