@@ -317,11 +317,13 @@ struct RecordDetail: View {
 
     @Environment(AppModel.self) private var model
     @State private var transcriptExpanded = false
+    @State private var showEditSheet = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                editSyncStatus
 
                 if record.audioFile != nil {
                     card("Audio") {
@@ -439,6 +441,44 @@ struct RecordDetail: View {
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .scrollContentBackground(.hidden)
+        .toolbar {
+            ToolbarButton(title: "Edit", systemImage: "pencil") {
+                showEditSheet = true
+            }
+        }
+        .sheet(isPresented: $showEditSheet) {
+            EditTextSheet(record: record) { edit in
+                model.save(edit, for: record)
+            }
+        }
+    }
+
+    /// Push status of the optimistic edit (issue 10): quiet while syncing, a
+    /// retryable message when the push failed. Retry is the only recovery path.
+    @ViewBuilder
+    private var editSyncStatus: some View {
+        switch model.editSyncState(for: record.id) {
+        case .idle:
+            EmptyView()
+        case .pushing:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Saving edits…")
+                    .font(ND.mono(12))
+                    .foregroundStyle(ND.textTertiary)
+            }
+        case .failed(let message):
+            HStack(spacing: 12) {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(ND.ui(13))
+                    .foregroundStyle(ND.error)
+                Button("Retry") {
+                    model.retryEditPush(for: record.id)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+        }
     }
 
     private var header: some View {

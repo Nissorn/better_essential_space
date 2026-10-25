@@ -25,6 +25,15 @@ final class AppModel {
         case otp(maskedEmail: String)
     }
 
+    /// Per-Record push state for text edits (issue 10). AppModel is @MainActor
+    /// and the only writer; the optimistic edit is always already in `records`.
+    enum EditSyncState: Equatable {
+        case idle
+        case pushing
+        /// Keep the optimistic edit; Retry re-sends it.
+        case failed(String)
+    }
+
     private(set) var phase: Phase = .loading
     private(set) var records: [Record] = []
     private(set) var collections: [CollectionSummary] = []
@@ -48,6 +57,9 @@ final class AppModel {
     private let client: ESClient
     private let authflow: AuthflowClient
     private let cacheURL: URL
+    private let audioStore: AudioStore
+    private var editSyncStates: [Record.ID: EditSyncState] = [:]
+    private var editPushTasks: [Record.ID: Task<Void, Never>] = [:]
     private var pendingStateToken: String?
     private var loadTask: Task<Void, Never>?
 
@@ -63,6 +75,7 @@ final class AppModel {
         self.client = resolvedClient
         self.authflow = authflow
         self.cacheURL = cacheURL
+        self.audioStore = audioStore
         self.audio = AudioLibrary(client: resolvedClient, store: audioStore)
     }
 
@@ -103,6 +116,13 @@ final class AppModel {
     }
 
     func signOut() {
+        for task in editPushTasks.values {
+            task.cancel()
+        }
+        editPushTasks = [:]
+        editSyncStates = [:]
+        audio.reset()
+        audioStore.removeAll()
         accountSession.clearTokens()
         RecordCache.remove(at: cacheURL)
         records = []
@@ -113,6 +133,81 @@ final class AppModel {
         pendingStateToken = nil
         loginStage = .idle
         phase = .needsToken(nil)
+    }
+
+    // MARK: Text editing (issue 10)
+
+    func editSyncState(for id: Record.ID) -> EditSyncState {
+        editSyncStates[id] ?? .idle
+    }
+
+    /// The single write path (issue 10). Optimistic: the edited Record is
+    /// visible and persisted BEFORE any network. The Record's
+    /// clientRequestResponse is the single source of truth for what the server
+    /// should say — every push and every retry re-sends exactly that value;
+    /// there is no separate pending queue to drift out of sync.
+    /// clientUpdateTime derives from record.updatedAt (stamped by `applying`),
+    /// so last-write-wins with the phone app is the server's documented
+    /// behaviour expressed through one clock.
+    func save(_ edit: CardTextEdit, for record: Record) {
+        let updated: Record
+        do {
+            updated = try record.applying(edit)
+        } catch {
+            show(error: error) // a raced edit (a topic vanished in a reload)
+            return
+        }
+        upsert(updated)
+        persistSnapshot()
+        pushEdit(of: updated)
+    }
+
+    /// Retry re-sends the CURRENT optimistic record — no stored payload,
+    /// nothing to lose.
+    func retryEditPush(for id: Record.ID) {
+        guard let record = records.first(where: { $0.id == id }) else { return }
+        pushEdit(of: record)
+    }
+
+    private func pushEdit(of record: Record) {
+        // A newer edit supersedes the in-flight push; a double-send is
+        // idempotent anyway (the server replaces with identical content).
+        editPushTasks[record.id]?.cancel()
+        editSyncStates[record.id] = .pushing
+        let client = client
+        editPushTasks[record.id] = Task { [weak self] in
+            do {
+                let echo = try await client.updateCard(record)
+                // A save that raced this await owns the state now.
+                guard !Task.isCancelled else { return }
+                await self?.finishEditPush(echo: echo, for: record)
+            } catch is CancellationError {
+                // superseded — the newer push owns the state
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.editSyncStates[record.id] = .failed(Self.presentableEditError(error))
+            }
+        }
+    }
+
+    private func finishEditPush(echo: Card?, for record: Record) {
+        // The server echo wins when it decodes; the pushed value always lands.
+        upsert(echo.flatMap { try? Record(card: $0) } ?? record)
+        persistSnapshot()
+        editSyncStates[record.id] = .idle
+    }
+
+    private func upsert(_ record: Record) {
+        if let index = records.firstIndex(where: { $0.id == record.id }) {
+            records[index] = record
+        } else {
+            records.append(record)
+            records.sort { $0.createdAt > $1.createdAt }
+        }
+    }
+
+    private static func presentableEditError(_ error: Error) -> String {
+        (error as? ESError)?.errorDescription ?? error.localizedDescription
     }
 
     // MARK: In-app Authflow login (M2: email + password -> OTP -> tokens)
