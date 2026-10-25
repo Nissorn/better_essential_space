@@ -65,8 +65,13 @@ struct SettingsScreen: View {
                     }
                 }
 
-                card("Runtime key files") {
+                card("Key overrides (advanced)") {
                     VStack(alignment: .leading, spacing: 0) {
+                        Text("Both Nothing app keys are bundled with the app. A plain-text value in a file below overrides the bundled key — the fix path if Nothing rotates them.")
+                            .font(ND.ui(13))
+                            .foregroundStyle(ND.textTertiary)
+                            .padding(.top, 10)
+                            .padding(.bottom, 2)
                         monoRow("Legacy API key", "~/.better-essential-space/legacy-api-key")
                         monoRow("Account signing key", "~/.better-essential-space/account-signing-key")
                     }

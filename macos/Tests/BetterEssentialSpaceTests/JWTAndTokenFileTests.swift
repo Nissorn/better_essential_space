@@ -92,22 +92,12 @@ final class RuntimeSecretsTests: XCTestCase {
         return url
     }
 
-    func testMissingLegacyAPIKeyThrowsTypedError() {
-        XCTAssertThrowsError(try RuntimeSecrets.legacyAPIKey(directory: temporaryDirectorySafe())) { error in
-            guard case let ESError.missingLegacyAPIKey(path) = error else {
-                return XCTFail("expected missingLegacyAPIKey, got \(error)")
-            }
-            XCTAssertTrue(path.hasSuffix("legacy-api-key"), path)
-        }
-    }
-
-    func testMissingAccountSigningKeyThrowsTypedError() {
-        XCTAssertThrowsError(try RuntimeSecrets.accountSigningKey(directory: temporaryDirectorySafe())) { error in
-            guard case let ESError.missingAccountSigningKey(path) = error else {
-                return XCTFail("expected missingAccountSigningKey, got \(error)")
-            }
-            XCTAssertTrue(path.hasSuffix("account-signing-key"), path)
-        }
+    func testAbsentOverrideFileFallsBackToEmbeddedKeys() throws {
+        let directory = try temporaryDirectory()
+        XCTAssertEqual(try RuntimeSecrets.legacyAPIKey(directory: directory), EmbeddedKeys.legacyAPIKey)
+        XCTAssertEqual(try RuntimeSecrets.accountSigningKey(directory: directory), EmbeddedKeys.accountSigningKey)
+        XCTAssertFalse(EmbeddedKeys.legacyAPIKey.isEmpty)
+        XCTAssertFalse(EmbeddedKeys.accountSigningKey.isEmpty)
     }
 
     func testLoadsKeyTrimmed() throws {
@@ -128,9 +118,5 @@ final class RuntimeSecretsTests: XCTestCase {
     func testErrorMessagesNameTheFile() {
         let message = ESError.missingLegacyAPIKey("/Users/x/.better-essential-space/legacy-api-key").errorDescription
         XCTAssertTrue(message?.contains("legacy-api-key") == true, message ?? "")
-    }
-
-    private func temporaryDirectorySafe() -> URL {
-        (try? temporaryDirectory()) ?? FileManager.default.temporaryDirectory
     }
 }

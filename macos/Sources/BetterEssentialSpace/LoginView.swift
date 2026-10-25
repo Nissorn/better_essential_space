@@ -60,8 +60,9 @@ struct LoginView: View {
                     }
                     disclosure("What does the app need on this Mac?") {
                         VStack(alignment: .leading, spacing: 10) {
-                            requirement("~/.better-essential-space/legacy-api-key", "records-host key — fetching Records fails without it")
-                            requirement("~/.better-essential-space/account-signing-key", "signs every account request, login included")
+                            requirement("Nothing to set up", "both Nothing app keys are bundled with the app; your tokens stay in this Mac's Keychain")
+                            requirement("~/.better-essential-space/legacy-api-key", "optional override — records-host key, only needed if Nothing rotates it")
+                            requirement("~/.better-essential-space/account-signing-key", "optional override — account request signing key")
                         }
                         .padding(.top, 10)
                     }

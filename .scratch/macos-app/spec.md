@@ -16,8 +16,8 @@ A native macOS client that logs in with a Nothing Account and displays the user'
 - **App form:** regular window app — `NavigationSplitView` (list sidebar + detail).
 - **Identity:** display name "Better Essential Space", bundle id `com.nissorn.betteressentialspace`.
 - **Stack:** SwiftUI + Observation, Swift 6, `URLSession` + `Codable`, zero third-party dependencies, deployment target macOS 26. Code lives in `macos/` as a Swift package (SPM executable + bundle script; also opens in Xcode).
-- **Secrets policy:** tokens live in the Keychain; the HMAC signing key and everything in `secrets/` stay out of the repo and out of the app binary — the signer loads its key from a runtime file path.
-- **Distribution:** personal use now; a public release is a later decision (key-distribution question tracked as issue 06).
+- **Secrets policy:** tokens live in the Keychain; everything in `secrets/` (personal tokens, captures) stays out of the repo. The two shared APK-derived app keys are published in-source (`EmbeddedKeys.swift`, issue 06 decision 2026-10-25), with runtime-file overrides for rotations.
+- **Distribution:** open-source on GitHub — users build from source (no notarization involved) and log in with their own accounts. Name kept as "Better Essential Space" (owner decision, issue 06).
 
 ## Open items
 

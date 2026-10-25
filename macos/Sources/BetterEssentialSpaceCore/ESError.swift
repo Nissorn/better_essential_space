@@ -1,7 +1,8 @@
 import Foundation
 
 /// Typed errors surfaced by the client. Every case carries a user-presentable message;
-/// the missing-key cases name the exact runtime file the app needs.
+/// the missing-key cases fire when a key override file exists but is empty — an
+/// absent file falls back to the bundled key (RuntimeSecrets).
 public enum ESError: Error, Equatable {
     case notSignedIn
     case sessionExpired(String)
@@ -26,9 +27,9 @@ public enum ESError: Error, Equatable {
         case .hostUnauthorized(let reason):
             return "Still unauthorized (401) after refreshing the Access Token — the session was kept. \(reason)"
         case .missingLegacyAPIKey(let path):
-            return "Missing legacy API key file at \(path). Records cannot be fetched without it. See macos/README.md."
+            return "The legacy API key override at \(path) is empty. Delete the file to use the bundled key, or write the new records-host key into it."
         case .missingAccountSigningKey(let path):
-            return "Missing account signing key file at \(path). Token refresh needs it for the x-app-signature header. See macos/README.md."
+            return "The account signing key override at \(path) is empty. Delete the file to use the bundled key, or write the new key into it."
         case .keychainFailure(let status):
             return "Keychain error (OSStatus \(status))."
         case .invalidTokenFile(let detail):

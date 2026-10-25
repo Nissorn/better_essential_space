@@ -4,7 +4,7 @@ A native macOS client that reads a Nothing account's Essential Space content: vo
 
 ## State
 
-Working (v2): native email + password + OTP login against Nothing's Authflow (`account.nothing.tech`), automatic token refresh, and Records (title, main topics, summary, date, duration, Transcript inline) + account preferences. v2 redesigned the whole UI — scheme-dynamic light/dark tokens with a System/Light/Dark picker in Settings, gradient canvas and accent-gradient buttons, card-based detail, bundled Doto/Geist/Geist Mono (SIL OFL). The M1 token-file import remains as a fallback on the login screen. Audio playback is deferred (Firebase Storage rejects non-genuine clients for now — notes/03).
+Working (v2): native email + password + OTP login against Nothing's Authflow (`account.nothing.tech`), automatic token refresh, and Records (title, main topics, summary, date, duration, Transcript inline) + account preferences. v2 redesigned the whole UI — scheme-dynamic light/dark tokens with a System/Light/Dark picker in Settings, gradient canvas and accent-gradient buttons, card-based detail, bundled Doto/Geist/Geist Mono (SIL OFL). The M1 token-file import remains as a fallback on the login screen. Audio playback is deferred (Firebase Storage rejects non-genuine clients for now — notes/03). Since the public-release prep (issue 06) both shared app keys are bundled in-source, so a fresh clone runs with zero key setup.
 
 ## Build & run
 
@@ -19,14 +19,14 @@ scripts/build-app.sh        # -> dist/BetterEssentialSpace.app (ad-hoc signed)
 
 With Command Line Tools alone only the logic library builds: `swift build --target BetterEssentialSpaceCore`.
 
-## Runtime key files (never in the repo or binary)
+## Keys
 
-The app reads two plain-text key files at launch-time use:
+Both shared Nothing app keys ship as compile-time defaults in `EmbeddedKeys.swift` (issue 06 decision: publish them — APK-derived values shared by every install of the official app, not personal credentials), so a fresh clone works with no setup:
 
-- `~/.better-essential-space/legacy-api-key` — the records-host key for the `auth` header (`md5(key + timestamp)`; from `ConfigUtil.getApiKey`, notes/03).
-- `~/.better-essential-space/account-signing-key` — HMAC key for `x-app-signature` on every account request, login included (notes/02 §"Request signing").
+- **Legacy API key** — records-host key for the `auth` header (`md5(key + timestamp)`; from `ConfigUtil.getApiKey`, notes/03).
+- **Account signing key** — HMAC key for `x-app-signature` on every account request, login included (notes/02 §"Request signing").
 
-Fetching Records fails with a clear error if the first file is missing; login and refresh need the second.
+`RuntimeSecrets` also reads an optional plain-text override at `~/.better-essential-space/legacy-api-key` / `account-signing-key` (one trimmed value per file). An override file wins over the bundled key — the fix path if Nothing rotates the keys, no app update needed. An existing-but-empty override is an error (delete it to fall back). Personal tokens never go through this path; they live in the Keychain.
 
 ## Signing in
 
@@ -34,6 +34,6 @@ Run the app → email + password → enter the OTP Nothing emails → done. The 
 
 ## Layout
 
-- `Sources/BetterEssentialSpaceCore/` — models, `ESClient` (both hosts), `AccountSession` (Keychain + refresh), `AuthflowClient` (login), `AuthSigning` (all three header schemes), `RuntimeSecrets`, `TokenFile`
+- `Sources/BetterEssentialSpaceCore/` — models, `ESClient` (both hosts), `AccountSession` (Keychain + refresh), `AuthflowClient` (login), `AuthSigning` (all three header schemes), `EmbeddedKeys` + `RuntimeSecrets` (bundled keys, optional overrides), `TokenFile`
 - `Sources/BetterEssentialSpace/` — SwiftUI app (`AppModel`, Records list/detail, Settings, Login screen)
 - `Tests/` — decoding, signing, JWT, refresh-flow, Keychain round-trip (all mocked; the card fixture is redacted, built from the shape in `secrets/fixtures/card_list_sample.json`)
