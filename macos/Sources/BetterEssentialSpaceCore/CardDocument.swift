@@ -28,6 +28,24 @@ public struct CardDocument: Equatable, Sendable {
         self.rawJSON = rawJSON
     }
 
+    /// The sum of RECORDING metadata `size` values in a raw payload — the honest
+    /// per-card size the update envelope encrypts (notes/04: "prefer the sum").
+    /// 0 when the payload carries no recording sizes.
+    public static func recordingSizeBytes(of rawJSON: String) -> Int64 {
+        guard let root = try? JSONSerialization.jsonObject(with: Data(rawJSON.utf8)) as? [String: Any],
+              let resources = root["card_resources"] as? [[String: Any]]
+        else { return 0 }
+        return resources
+            .filter { $0["raw_type"] as? String == "RECORDING" }
+            .compactMap { resource -> Int64? in
+                guard let metadata = resource["metadata"] as? String,
+                      let dictionary = try? JSONSerialization.jsonObject(with: Data(metadata.utf8)) as? [String: Any]
+                else { return nil }
+                return dictionary["size"] as? Int64
+            }
+            .reduce(0, +)
+    }
+
     /// Pure. Mutates only `cards.title`, `cards.summary`, and the metadata of
     /// MEETING_MAIN_TOPIC / MEETING_KEY_TOPIC_ANALYSIS `card_analysis` entries
     /// matched by `card_analysis_id`. Every other key — known, unknown, future —

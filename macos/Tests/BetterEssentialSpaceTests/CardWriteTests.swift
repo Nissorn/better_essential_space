@@ -254,4 +254,123 @@ final class CardWriteTests: XCTestCase {
             }
         }
     }
+
+    func testRecordingSizeBytesSumsRecordingMetadata() throws {
+        let records = try fixtureRecords()
+        // Fixture card 1: one RECORDING of 1234567 bytes; card 3: 42 bytes.
+        XCTAssertEqual(CardDocument.recordingSizeBytes(of: records[0].clientRequestResponse), 1_234_567)
+        XCTAssertEqual(CardDocument.recordingSizeBytes(of: records[2].clientRequestResponse), 42)
+        XCTAssertEqual(CardDocument.recordingSizeBytes(of: "{}"), 0)
+    }
+
+    // MARK: Write envelope (notes/04; vectors cross-checked against openssl)
+
+    /// Key "0123456789abcdef0123456789abcdef": openssl enc -aes-256-ecb -K
+    /// 3031323334353637383961626364656630313233343536373839616263646566.
+    private static let vectorKeyB64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    private static let vectorKey: Data = Data(base64Encoded: vectorKeyB64)!
+
+    func testAES256ECBSealMatchesOpensslVectors() throws {
+        XCTAssertEqual(try AES256ECB.seal("BES-test-device", key: Self.vectorKey), "5m/174rjC5yeSWq8CL1fMw==")
+        XCTAssertEqual(try AES256ECB.seal("9747378", key: Self.vectorKey), "ba9GDF32c8OUmffFfhFU0A==")
+    }
+
+    func testEnvelopeSealsDevicePayloadAndPerCardSize() throws {
+        let (privateKey, publicKey) = try Self.makeRSAKeyPair()
+        let envelope = try WriteEnvelope.make(deviceId: "BES-test-device", claimKey: publicKey, aesKey: Self.vectorKey)
+
+        XCTAssertEqual(envelope.devicePayload, "5m/174rjC5yeSWq8CL1fMw==")
+        XCTAssertEqual(try envelope.sealed("9747378"), "ba9GDF32c8OUmffFfhFU0A==")
+
+        // cipherKey unwraps with the private half back to the base64 key STRING.
+        let cipherData = try XCTUnwrap(Data(base64Encoded: envelope.cipherKey))
+        let unwrapped = try XCTUnwrap(
+            SecKeyCreateDecryptedData(privateKey, .rsaEncryptionPKCS1, cipherData as CFData, nil) as Data?
+        )
+        XCTAssertEqual(String(data: unwrapped, encoding: .utf8), Self.vectorKeyB64)
+    }
+
+    func testEnvelopeRejectsWrongKeyLength() throws {
+        let (_, publicKey) = try Self.makeRSAKeyPair()
+        XCTAssertThrowsError(
+            try WriteEnvelope.make(deviceId: "d", claimKey: publicKey, aesKey: Data(repeating: 1, count: 16))
+        ) { error in
+            guard case ESError.invalidResponse = error else {
+                return XCTFail("expected invalidResponse, got \(error)")
+            }
+        }
+    }
+
+    private static func makeRSAKeyPair() throws -> (SecKey, SecKey) {
+        let attributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeRSA,
+            kSecAttrKeySizeInBits: 2048,
+        ]
+        let privateKey = try XCTUnwrap(SecKeyCreateRandomKey(attributes as CFDictionary, nil))
+        let publicKey = try XCTUnwrap(SecKeyCopyPublicKey(privateKey))
+        return (privateKey, publicKey)
+    }
+
+    // MARK: claimKey (disk-only secret, issue 10)
+
+    func testClaimKeyMissingOrEmptyFileThrowsMissingClaimKey() throws {
+        let directory = try temporarySecretsDirectory()
+        let path = directory.appendingPathComponent(RuntimeSecrets.claimKeyFilename).path
+
+        XCTAssertThrowsError(try RuntimeSecrets.claimKey(directory: directory)) { error in
+            XCTAssertEqual(error as? ESError, .missingClaimKey(path))
+        }
+
+        try Data("  \n".utf8).write(to: directory.appendingPathComponent(RuntimeSecrets.claimKeyFilename))
+        XCTAssertThrowsError(try RuntimeSecrets.claimKey(directory: directory)) { error in
+            XCTAssertEqual(error as? ESError, .missingClaimKey(path))
+        }
+    }
+
+    func testClaimKeyUndecodableOrNotRSAThrowsInvalidClaimKey() throws {
+        let directory = try temporarySecretsDirectory()
+        let fileURL = directory.appendingPathComponent(RuntimeSecrets.claimKeyFilename)
+
+        try Data("this is not base64 !!".utf8).write(to: fileURL)
+        XCTAssertThrowsError(try RuntimeSecrets.claimKey(directory: directory)) { error in
+            XCTAssertEqual(error as? ESError, .invalidClaimKey(fileURL.path))
+        }
+
+        // Valid base64, but not RSA key material.
+        try Data(repeating: 7, count: 64).base64EncodedString().write(to: fileURL, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try RuntimeSecrets.claimKey(directory: directory)) { error in
+            XCTAssertEqual(error as? ESError, .invalidClaimKey(fileURL.path))
+        }
+    }
+
+    func testClaimKeyLoadsSingleLineAndPEMWrappedFiles() throws {
+        let directory = try temporarySecretsDirectory()
+        let fileURL = directory.appendingPathComponent(RuntimeSecrets.claimKeyFilename)
+        let (_, publicKey) = try Self.makeRSAKeyPair()
+        let external = try XCTUnwrap(SecKeyCopyExternalRepresentation(publicKey, nil) as Data?)
+
+        // Single-line base64 (the frida-dump shape).
+        try external.base64EncodedString().write(to: fileURL, atomically: true, encoding: .utf8)
+        let singleLine = try RuntimeSecrets.claimKey(directory: directory)
+        XCTAssertEqual(try XCTUnwrap(SecKeyCopyExternalRepresentation(singleLine, nil) as Data?), external)
+
+        // PEM armor + 64-column wrapping tolerated.
+        let base64 = external.base64EncodedString()
+        let wrapped = stride(from: 0, to: base64.count, by: 64).map {
+            String(base64[base64.index(base64.startIndex, offsetBy: $0)...])
+        }
+        let pem = (["-----BEGIN PUBLIC KEY-----"] + wrapped + ["-----END PUBLIC KEY-----"])
+            .joined(separator: "\n") + "\n"
+        try Data(pem.utf8).write(to: fileURL)
+        let pemWrapped = try RuntimeSecrets.claimKey(directory: directory)
+        XCTAssertEqual(try XCTUnwrap(SecKeyCopyExternalRepresentation(pemWrapped, nil) as Data?), external)
+    }
+
+    private func temporarySecretsDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claim-key-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return directory
+    }
 }
