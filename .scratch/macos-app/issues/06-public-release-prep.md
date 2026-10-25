@@ -19,7 +19,7 @@ Decisions (owner, 2026-10-25):
 - [x] Git history rewritten to GitHub noreply email (`85168988+Nissorn@users.noreply.github.com`); tags v1.0.0/v2.0.0 re-pointed; local `user.email` set for future commits
 - [x] `EmbeddedKeys.swift` + `RuntimeSecrets` fallback (absent file → bundled key; existing-but-empty override → typed error); Login/Settings copy updated
 - [x] Root `README.md` (disclaimer, build steps, keys, project layout) + `LICENSE` (MIT)
-- [x] `.zcode/` untracked and gitignored; app version bumped to 2.1.0 in build-app.sh
+- [x] `.zcode/` untracked and gitignored; app version set to 2.0.1 (patch on v2.0.0) for the first packaged release
 - [x] Tests updated for the fallback contract — 58/58 green; dist app rebuilt
 
 ## Comments
