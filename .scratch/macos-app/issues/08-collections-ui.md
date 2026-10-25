@@ -1,6 +1,6 @@
 # 08 — Collections in the Records UI
 
-Status: ready-for-human
+Status: done (user-verified 2026-10-26)
 Type: feature
 
 ## Summary
