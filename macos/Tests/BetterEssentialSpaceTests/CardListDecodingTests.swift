@@ -110,6 +110,65 @@ final class CardListDecodingTests: XCTestCase {
         XCTAssertNil(third.mainTopics.first?.content)
     }
 
+    func testRecordRetainsRawDocumentFilesAndAudioFile() throws {
+        let envelope = try JSONDecoder().decode(LegacyEnvelope<CardListPage>.self, from: fixtureData())
+        let card = try XCTUnwrap(envelope.data?.pageData.first)
+        let record = try Record(card: card)
+
+        // The retained string is byte-identical to the wire string, and still parses.
+        XCTAssertEqual(record.clientRequestResponse, card.clientRequestResponse)
+        XCTAssertNotNil(
+            try? JSONSerialization.jsonObject(with: Data(record.clientRequestResponse.utf8))
+        )
+
+        XCTAssertEqual(
+            record.files,
+            [CardFile(
+                region: "asia-south1",
+                gcsKey: "audioRequest/db41be7278059497304a7a408a6c303d/10000000-0000-4000-8000-000000000001/20000000-0000-4000-8000-000000000001.aac"
+            )]
+        )
+        // The RECORDING resource's remote pair is the audio file.
+        XCTAssertEqual(record.audioFile, record.files.first)
+    }
+
+    func testAudioFileFallsBackToCardFilesThenNil() throws {
+        func makeRecord(resourcesJSON: String, filesJSON: String) throws -> Record {
+            let payloadJSON = """
+            {"cards":{"card_id":"c1","title":"t","summary":null,"type":"RECORDING","create_time":1,"update_time":2},
+             "card_resources":[\(resourcesJSON)]}
+            """
+            let payload = try JSONSerialization.jsonObject(with: Data(payloadJSON.utf8))
+            let outer: [String: Any] = [
+                "cardId": "c1",
+                "client_request_response": String(
+                    data: try JSONSerialization.data(withJSONObject: payload), encoding: .utf8
+                ),
+                "files": try JSONSerialization.jsonObject(with: Data(filesJSON.utf8)),
+            ]
+            let card = try JSONDecoder().decode(
+                Card.self, from: try JSONSerialization.data(withJSONObject: outer)
+            )
+            return try Record(card: card)
+        }
+
+        let emptyGcsResource = #"{"card_resource_id":"r1","raw_type":"RECORDING","remote_gcsKey":"","remote_region":""}"#
+        let noKeyResource = #"{"card_resource_id":"r1","raw_type":"TRANSCRIPTION","data":"text"}"#
+        let file = #"{"region":"asia-south1","gcsKey":"audioRequest/x/c1/r1.aac"}"#
+
+        // No recording remote pair -> the first usable Card file.
+        let fallback = try makeRecord(resourcesJSON: noKeyResource, filesJSON: "[\(file)]")
+        XCTAssertEqual(fallback.audioFile?.gcsKey, "audioRequest/x/c1/r1.aac")
+
+        // Neither resource nor files -> no audio.
+        let none = try makeRecord(resourcesJSON: noKeyResource, filesJSON: "[]")
+        XCTAssertNil(none.audioFile)
+
+        // An empty remote gcsKey must not shadow a usable Card file.
+        let blank = try makeRecord(resourcesJSON: emptyGcsResource, filesJSON: "[\(file)]")
+        XCTAssertEqual(blank.audioFile?.gcsKey, "audioRequest/x/c1/r1.aac")
+    }
+
     func testSearchMatchesAcrossTextFields() throws {
         let envelope = try JSONDecoder().decode(LegacyEnvelope<CardListPage>.self, from: fixtureData())
         let records = try envelope.data!.pageData.map { try Record(card: $0) }
