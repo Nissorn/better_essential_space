@@ -292,6 +292,12 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
     /// The Collections this Record belongs to (from the Card's cross-refs).
     public let collectionIds: [String]
 
+    /// Stands in for a Card that has no title of its own.
+    public static let untitledTitle = "Untitled Record"
+
+    /// True when the Card carries no title, so `title` is the stand-in.
+    public var isUntitled: Bool { title == Self.untitledTitle }
+
     /// True when any user-visible text of this Record contains `query`
     /// (case-insensitive): title, summary, Transcript, topics, speakers.
     public func matches(searchQuery query: String) -> Bool {
@@ -354,7 +360,7 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
         let payload = try JSONDecoder().decode(CardPayload.self, from: payloadData)
 
         id = card.cardId
-        title = payload.cards.title?.isEmpty == false ? payload.cards.title! : "Untitled Record"
+        title = payload.cards.title?.isEmpty == false ? payload.cards.title! : Self.untitledTitle
         summary = payload.cards.summary
         createdAt = Date(epochMilliseconds: payload.cards.createTime ?? card.clientCreateTime ?? 0)
         updatedAt = updatedAtStamp

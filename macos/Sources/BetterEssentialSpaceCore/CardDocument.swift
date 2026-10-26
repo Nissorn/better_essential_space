@@ -3,7 +3,7 @@ import Foundation
 /// A text edit of one Record. nil field = leave the server's value untouched; ""
 /// clears it (summary, topic content). Topics are edited in place, matched by
 /// `card_analysis_id` — adding or removing topics is out of scope by decision.
-public struct CardTextEdit: Equatable, Sendable {
+public struct CardTextEdit: Equatable, Sendable, Codable {
     public var title: String?
     public var summary: String?
     public var mainTopics: [MainTopic]?
@@ -12,6 +12,24 @@ public struct CardTextEdit: Equatable, Sendable {
         self.title = title
         self.summary = summary
         self.mainTopics = mainTopics
+    }
+
+    /// `newer` layered over this edit: its non-nil fields win, and topics merge
+    /// by id so an edit of one topic keeps an earlier edit of another.
+    public func merged(with newer: CardTextEdit) -> CardTextEdit {
+        var topics = mainTopics ?? []
+        for topic in newer.mainTopics ?? [] {
+            if let index = topics.firstIndex(where: { $0.id == topic.id }) {
+                topics[index] = topic
+            } else {
+                topics.append(topic)
+            }
+        }
+        return CardTextEdit(
+            title: newer.title ?? title,
+            summary: newer.summary ?? summary,
+            mainTopics: topics.isEmpty ? nil : topics
+        )
     }
 }
 

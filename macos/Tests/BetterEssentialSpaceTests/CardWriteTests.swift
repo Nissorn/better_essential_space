@@ -212,6 +212,27 @@ final class CardWriteTests: XCTestCase {
         XCTAssertEqual(after, before)
     }
 
+    func testMergedEditLayersNewerFieldsAndKeepsOtherTopics() {
+        let earlier = CardTextEdit(
+            title: "Old title",
+            summary: "Kept summary",
+            mainTopics: [MainTopic(id: "a", title: "A1", content: nil), MainTopic(id: "b", title: "B1", content: "b")]
+        )
+        let merged = earlier.merged(with: CardTextEdit(
+            title: "New title",
+            mainTopics: [MainTopic(id: "b", title: "B2", content: "b2"), MainTopic(id: "c", title: "C", content: nil)]
+        ))
+        XCTAssertEqual(merged, CardTextEdit(
+            title: "New title",
+            summary: "Kept summary",
+            mainTopics: [
+                MainTopic(id: "a", title: "A1", content: nil),
+                MainTopic(id: "b", title: "B2", content: "b2"),
+                MainTopic(id: "c", title: "C", content: nil),
+            ]
+        ))
+    }
+
     // MARK: Unknown-key preservation
 
     func testUnknownKeysSurviveAnEditRoundTrip() throws {

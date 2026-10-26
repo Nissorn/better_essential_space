@@ -312,19 +312,20 @@ struct RecordRow: View {
     }
 }
 
+/// A Record's page. The title, summary, and each main topic edit in place
+/// (InlineTextField); Transcript, speakers, and tone stay read-only.
 struct RecordDetail: View {
     let record: Record
     var collectionNames: [String] = []
 
     @Environment(AppModel.self) private var model
     @State private var transcriptExpanded = false
-    @State private var showEditSheet = false
+    @FocusState private var focus: EditableField?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
-                editSyncStatus
 
                 if record.audioFile != nil {
                     card("Audio") {
@@ -343,25 +344,7 @@ struct RecordDetail: View {
                         .buttonStyle(SecondaryButtonStyle())
                         VStack(alignment: .leading, spacing: 18) {
                             ForEach(Array(record.mainTopics.enumerated()), id: \.element.id) { index, topic in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                        Text("\(index + 1)")
-                                            .font(ND.mono(13, weight: .medium))
-                                            .foregroundStyle(ND.accent)
-                                        Text(topic.title)
-                                            .font(ND.ui(15, weight: .semibold))
-                                            .foregroundStyle(ND.textPrimary)
-                                            .textSelection(.enabled)
-                                    }
-                                    if let content = topic.content, !content.isEmpty {
-                                        Text(content)
-                                            .font(ND.body)
-                                            .foregroundStyle(ND.textSecondary)
-                                            .lineSpacing(5)
-                                            .textSelection(.enabled)
-                                            .padding(.leading, 25)
-                                    }
-                                }
+                                topicBlock(topic, number: index + 1)
                             }
                         }
                         .padding(.top, 16)
@@ -383,15 +366,16 @@ struct RecordDetail: View {
                     }
                 }
 
-                if let summary = record.summary, !summary.isEmpty {
-                    card("Summary") {
-                        Text(summary)
-                            .font(ND.body)
-                            .foregroundStyle(ND.textPrimary)
-                            .lineSpacing(6)
-                            .textSelection(.enabled)
-                            .padding(.top, 14)
-                    }
+                card("Summary") {
+                    InlineTextField(
+                        value: record.summary ?? "",
+                        placeholder: "Add a summary…",
+                        font: ND.body,
+                        lineSpacing: 6,
+                        field: .summary,
+                        focus: $focus
+                    ) { model.save(CardTextEdit(summary: $0), recordID: record.id) }
+                    .padding(.top, 14)
                 }
 
                 card("Transcript") {
@@ -440,54 +424,61 @@ struct RecordDetail: View {
             .padding(36)
             .frame(maxWidth: 720, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
+            // Fresh fields per Record: a field's blur commit must never land
+            // on the Record selected next.
+            .id(record.id)
         }
         .scrollContentBackground(.hidden)
-        .toolbar {
-            ToolbarButton(title: "Edit", systemImage: "pencil") {
-                showEditSheet = true
+    }
+
+    private func topicBlock(_ topic: MainTopic, number: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("\(number)")
+                    .font(ND.mono(13, weight: .medium))
+                    .foregroundStyle(ND.accent)
+                InlineTextField(
+                    value: topic.title,
+                    placeholder: "Topic",
+                    font: ND.ui(15, weight: .semibold),
+                    field: .topicTitle(topic.id),
+                    focus: $focus,
+                    submitFocus: .topicContent(topic.id)
+                ) { saveTopic(topic.id, title: $0) }
             }
-        }
-        .sheet(isPresented: $showEditSheet) {
-            EditTextSheet(record: record) { edit in
-                model.save(edit, for: record)
-            }
+            InlineTextField(
+                value: topic.content ?? "",
+                placeholder: "Add details…",
+                font: ND.body,
+                color: ND.textSecondary,
+                lineSpacing: 5,
+                field: .topicContent(topic.id),
+                focus: $focus
+            ) { saveTopic(topic.id, content: $0) }
+            .padding(.leading, 25)
         }
     }
 
-    /// Push status of the optimistic edit (issue 10): quiet while syncing, a
-    /// retryable message when the push failed. Retry is the only recovery path.
-    @ViewBuilder
-    private var editSyncStatus: some View {
-        switch model.editSyncState(for: record.id) {
-        case .idle:
-            EmptyView()
-        case .pushing:
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Saving edits…")
-                    .font(ND.mono(12))
-                    .foregroundStyle(ND.textTertiary)
-            }
-        case .failed(let message):
-            HStack(spacing: 12) {
-                Label(message, systemImage: "exclamationmark.triangle")
-                    .font(ND.ui(13))
-                    .foregroundStyle(ND.error)
-                Button("Retry") {
-                    model.retryEditPush(for: record.id)
-                }
-                .buttonStyle(SecondaryButtonStyle())
-            }
-        }
+    /// A topic edit carries both fields, so the untouched one is read from the
+    /// model at commit time rather than from this render.
+    private func saveTopic(_ id: String, title: String? = nil, content: String? = nil) {
+        guard let current = model.records.first(where: { $0.id == record.id })?
+            .mainTopics.first(where: { $0.id == id })
+        else { return }
+        let topic = MainTopic(id: id, title: title ?? current.title, content: content ?? current.content)
+        model.save(CardTextEdit(mainTopics: [topic]), recordID: record.id)
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(record.title)
-                .font(ND.title)
-                .foregroundStyle(ND.textPrimary)
-                .textSelection(.enabled)
+            InlineTextField(
+                value: record.isUntitled ? "" : record.title,
+                placeholder: "Untitled",
+                font: ND.title,
+                field: .title,
+                focus: $focus,
+                submitFocus: .summary
+            ) { model.save(CardTextEdit(title: $0), recordID: record.id) }
             HStack(spacing: 18) {
                 Text(record.createdAt, format: .dateTime.month(.abbreviated).day().year().hour().minute())
                 if let duration = record.audioDurationMS {
@@ -499,6 +490,8 @@ struct RecordDetail: View {
                 if let size = record.audioSizeBytes {
                     Label(size.formatted(.byteCount(style: .file)), systemImage: "doc")
                 }
+                Spacer(minLength: 12)
+                EditSyncStatus(recordID: record.id)
             }
             .font(ND.mono(12))
             .foregroundStyle(ND.textTertiary)
@@ -523,5 +516,50 @@ struct RecordDetail: View {
             content()
         }
         .card()
+    }
+}
+
+/// Autosave status of one Record (issue 10): "Saving…" while a push is in
+/// flight, "Saved" once one lands, or the failure with Retry, the only
+/// recovery path.
+private struct EditSyncStatus: View {
+    let recordID: Record.ID
+
+    @Environment(AppModel.self) private var model
+    @State private var hasSaved = false
+
+    var body: some View {
+        let state = model.editSyncState(for: recordID)
+        Group {
+            switch state {
+            case .idle:
+                if hasSaved {
+                    Label("Saved", systemImage: "checkmark")
+                }
+            case .pushing:
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Saving…")
+                }
+            case .failed(let message):
+                HStack(spacing: 8) {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundStyle(ND.error)
+                        .help(message)
+                    Button("Retry") {
+                        model.retryEditPush(for: recordID)
+                    }
+                    .buttonStyle(.plain)
+                    .font(ND.mono(12, weight: .medium))
+                    .foregroundStyle(ND.accent)
+                }
+            }
+        }
+        .onChange(of: state) { old, new in
+            if old == .pushing, new == .idle { hasSaved = true }
+        }
     }
 }
