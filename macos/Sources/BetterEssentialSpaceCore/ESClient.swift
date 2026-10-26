@@ -95,15 +95,22 @@ public struct ESClient: Sendable {
 
     /// One call hides the whole download chain (notes/04): the signed-URL POST
     /// with the standard legacy headers, matching the response entry by
-    /// (region, gcsKey), the auth-free GCS V4 GET, and exactly ONE internal
-    /// re-sign-and-retry when GCS answers 403 (expired signature — signUrls
-    /// live ~1 h and are never persisted). GCS 404 (object gone) and transport
-    /// failures surface as `httpStatus`/`requestFailed`.
-    public func downloadAudio(for file: CardFile) async throws -> Data {
+    /// (region, gcsKey), the auth-free GCS V4 GET streamed to a temp file, and
+    /// exactly ONE internal re-sign-and-retry when GCS answers 403 (expired
+    /// signature — signUrls live 7 days, X-Goog-Expires=604800, and are never
+    /// persisted). GCS 404 (object gone) and transport failures surface as
+    /// `httpStatus`/`requestFailed`. Returns a complete temp file the caller
+    /// owns (move it into place, e.g. `AudioStore.store(fileAt:)`);
+    /// `progress` gets a 0...1 fraction, or nil while Content-Length is unknown.
+    public func downloadAudio(
+        for file: CardFile,
+        progress: @escaping @Sendable (Double?) -> Void = { _ in }
+    ) async throws -> URL {
         do {
-            return try await fetchAuthFree(try await signedURL(for: file))
+            return try await fetchAuthFree(try await signedURL(for: file), progress: progress)
         } catch ESError.httpStatus(403, _, _) {
-            return try await fetchAuthFree(try await signedURL(for: file))
+            progress(nil)
+            return try await fetchAuthFree(try await signedURL(for: file), progress: progress)
         }
     }
 
@@ -136,16 +143,34 @@ public struct ESClient: Sendable {
     /// Plain GET on a server-signed GCS URL. MUST NOT go through
     /// perform/performRecords — they attach Authorization, which GCS rejects;
     /// the V4 signature is in the URL itself.
-    private func fetchAuthFree(_ url: URL) async throws -> Data {
+    private func fetchAuthFree(_ url: URL, progress: @escaping @Sendable (Double?) -> Void) async throws -> URL {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        let (data, http) = try await send(request)
-        guard (200..<300).contains(http.statusCode) else {
-            // 401 has already passed send()'s refresh passthrough; for GCS it
-            // is simply a failure like any other status.
-            throw ESError.httpStatus(http.statusCode, code: nil, message: String(data: data, encoding: .utf8))
+        let tempURL: URL
+        let response: URLResponse
+        do {
+            (tempURL, response) = try await FileDownload.run(request, on: urlSession, progress: progress)
+        } catch {
+            if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                throw CancellationError()
+            }
+            throw ESError.requestFailed(error.localizedDescription)
         }
-        return data
+        guard let http = response as? HTTPURLResponse else {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw ESError.invalidResponse("non-HTTP response from \(url.host ?? "?")")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = (try? FileHandle(forReadingFrom: tempURL))
+                .flatMap { try? $0.read(upToCount: 4096) }
+            try? FileManager.default.removeItem(at: tempURL)
+            throw ESError.httpStatus(
+                http.statusCode,
+                code: nil,
+                message: body.flatMap { String(data: $0, encoding: .utf8) }
+            )
+        }
+        return tempURL
     }
 
     // MARK: Card updates (issue 10)
@@ -272,6 +297,78 @@ public struct ESClient: Sendable {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw ESError.invalidResponse("undecodable \(type) payload (HTTP \(http.statusCode)): \(error.localizedDescription)")
+        }
+    }
+}
+
+/// One URLSession download task, awaited. The async `download(for:delegate:)`
+/// reports no progress and leaves CFNetwork's temp file behind after a failed
+/// transfer; owning the task means the file goes straight to a path we name
+/// (and clean) and each written chunk reports a fraction.
+private final class FileDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let report: @Sendable (Double?) -> Void
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
+    private var movedFile: Result<URL, Error>?
+
+    private init(_ report: @escaping @Sendable (Double?) -> Void) {
+        self.report = report
+    }
+
+    static func run(
+        _ request: URLRequest,
+        on session: URLSession,
+        progress: @escaping @Sendable (Double?) -> Void
+    ) async throws -> (URL, URLResponse) {
+        let download = FileDownload(progress)
+        let task = session.downloadTask(with: request)
+        task.delegate = download
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                download.lock.withLock { download.continuation = continuation }
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard totalBytesExpectedToWrite > 0 else {
+            report(nil)
+            return
+        }
+        report(min(1, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)))
+    }
+
+    /// The system deletes `location` when this returns, so the move happens here.
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("essential-space-audio-\(UUID().uuidString).download")
+        let result = Result { try FileManager.default.moveItem(at: location, to: destination); return destination }
+        lock.withLock { movedFile = result }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let (continuation, file) = lock.withLock { () -> (CheckedContinuation<(URL, URLResponse), Error>?, Result<URL, Error>?) in
+            defer { self.continuation = nil }
+            return (self.continuation, movedFile)
+        }
+        if let error {
+            if case .success(let url)? = file { try? FileManager.default.removeItem(at: url) }
+            continuation?.resume(throwing: error)
+        } else if case .success(let url)? = file, let response = task.response {
+            continuation?.resume(returning: (url, response))
+        } else if case .failure(let moveError)? = file {
+            continuation?.resume(throwing: moveError)
+        } else {
+            continuation?.resume(throwing: URLError(.unknown))
         }
     }
 }

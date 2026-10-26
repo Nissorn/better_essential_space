@@ -14,10 +14,36 @@ final class MockURLProtocol: URLProtocol {
         self.handler = handler
     }
 
+    /// Body delivery shape for the next responses: chunked with a pause between
+    /// chunks, optionally dying mid-body. nil delivers the body in one piece.
+    struct Streaming: Sendable {
+        var chunkSize: Int
+        var pause: TimeInterval = 0.01
+        var failAfterChunks: Int?
+    }
+
+    nonisolated(unsafe) private static var streaming: Streaming?
+
+    static func setStreaming(_ streaming: Streaming?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.streaming = streaming
+    }
+
     static func reset() {
         lock.lock()
         defer { lock.unlock() }
         handler = nil
+        streaming = nil
+    }
+
+    private let stoppedLock = NSLock()
+    private var stopped = false
+
+    private var isStopped: Bool {
+        stoppedLock.lock()
+        defer { stoppedLock.unlock() }
+        return stopped
     }
 
     static func makeConfiguration() -> URLSessionConfiguration {
@@ -35,8 +61,10 @@ final class MockURLProtocol: URLProtocol {
 
     override func startLoading() {
         let currentHandler: (@Sendable (URLRequest) throws -> (HTTPURLResponse, Data))?
+        let currentStreaming: Streaming?
         MockURLProtocol.lock.lock()
         currentHandler = MockURLProtocol.handler
+        currentStreaming = MockURLProtocol.streaming
         MockURLProtocol.lock.unlock()
 
         guard let currentHandler else {
@@ -46,14 +74,33 @@ final class MockURLProtocol: URLProtocol {
         do {
             let (response, data) = try currentHandler(request)
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
+            guard let currentStreaming, (200..<300).contains(response.statusCode) else {
+                client?.urlProtocol(self, didLoad: data)
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            var sent = 0
+            for offset in stride(from: 0, to: data.count, by: currentStreaming.chunkSize) {
+                if isStopped { return }
+                if sent == currentStreaming.failAfterChunks {
+                    client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+                    return
+                }
+                client?.urlProtocol(self, didLoad: data[offset..<min(offset + currentStreaming.chunkSize, data.count)])
+                sent += 1
+                Thread.sleep(forTimeInterval: currentStreaming.pause)
+            }
             client?.urlProtocolDidFinishLoading(self)
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        stoppedLock.lock()
+        stopped = true
+        stoppedLock.unlock()
+    }
 }
 
 extension MockURLProtocol {
@@ -141,6 +188,16 @@ enum TestJWT {
 extension JWT {
     static func base64URLEncodeNoPad(_ data: Data) -> String {
         AuthSigning.base64URLEncodeNoPad(data)
+    }
+}
+
+extension AudioStore {
+    /// Seeds a cached download the way the app lands one: a complete temp file moved into place.
+    @discardableResult
+    func seed(_ data: Data, gcsKey: String) throws -> URL {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("seed-\(UUID().uuidString)")
+        try data.write(to: temp)
+        return try store(fileAt: temp, gcsKey: gcsKey)
     }
 }
 

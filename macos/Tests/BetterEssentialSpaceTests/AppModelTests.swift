@@ -361,7 +361,8 @@ final class AppModelTests: XCTestCase {
         gcsDelay: Double = 0,
         gcsStatus: Locked<Int>? = nil,
         bytes: Data,
-        signCount: Locked<Int>? = nil
+        signCount: Locked<Int>? = nil,
+        gcsCount: Locked<Int>? = nil
     ) throws {
         let record = try Self.fixtureRecord()
         let gcsKey = record.audioFile?.gcsKey ?? ""
@@ -376,9 +377,13 @@ final class AppModelTests: XCTestCase {
             if let gcsStatus, gcsStatus.get() != 200 {
                 return MockURLProtocol.error(request.url, status: gcsStatus.get(), json: "<Error/>")
             }
+            if let gcsCount { _ = gcsCount.with { $0 += 1 } }
             if gcsDelay > 0 { Thread.sleep(forTimeInterval: gcsDelay) }
             return (
-                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Length": String(bytes.count)]
+                )!,
                 bytes
             )
         }
@@ -405,7 +410,7 @@ final class AppModelTests: XCTestCase {
     func testAudioDiskHitShortCircuitsTheNetwork() async throws {
         let record = try Self.fixtureRecord()
         let cached = try AudioStore(directory: audioDirectory)
-            .store(Data("already-here".utf8), gcsKey: record.audioFile!.gcsKey!)
+            .seed(Data("already-here".utf8), gcsKey: record.audioFile!.gcsKey!)
         MockURLProtocol.setHandler { _ in
             XCTFail("a disk hit must not touch the network")
             return MockURLProtocol.error(nil, status: 500, json: "{}")
@@ -446,9 +451,83 @@ final class AppModelTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000) // let it reach the network
 
         // Navigating away must not cancel or corrupt the in-flight download.
-        XCTAssertEqual(model.audio.state(for: record), .downloading)
+        guard case .downloading = model.audio.state(for: record) else {
+            return XCTFail("expected .downloading, got \(model.audio.state(for: record))")
+        }
         let url = try await download.value
         XCTAssertEqual(model.audio.state(for: record), .ready(url))
+    }
+
+    private func audioFiles() -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: audioDirectory.path)) ?? [])
+    }
+
+    func testAudioDownloadReportsProgressThenLandsTheCompleteFile() async throws {
+        try signInWithToken()
+        let record = try Self.fixtureRecord()
+        let bytes = Data((0..<120_000).map { UInt8($0 % 241) })
+        try serveAudioDownload(bytes: bytes)
+        MockURLProtocol.setStreaming(.init(chunkSize: 6_000, pause: 0.02))
+
+        let download = Task { try await model.audio.ensureDownloaded(record) }
+        var observed: [Double] = []
+        for _ in 0..<50 where model.audio.state(for: record) == .notDownloaded {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        while case .downloading(let progress) = model.audio.state(for: record) {
+            if let progress { observed.append(progress) }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let url = try await download.value
+
+        XCTAssertTrue(observed.contains { $0 > 0 && $0 < 1 }, "the UI saw mid-download progress: \(observed)")
+        XCTAssertEqual(observed, observed.sorted())
+        XCTAssertEqual(model.audio.state(for: record), .ready(url))
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        XCTAssertEqual(audioFiles(), [url.lastPathComponent], "only the final file is on disk")
+    }
+
+    func testInterruptedAudioDownloadLeavesNothingAtTheFinalName() async throws {
+        try signInWithToken()
+        let record = try Self.fixtureRecord()
+        try serveAudioDownload(bytes: Data(count: 60_000))
+        MockURLProtocol.setStreaming(.init(chunkSize: 2_000, failAfterChunks: 4))
+
+        do {
+            _ = try await model.audio.ensureDownloaded(record)
+            XCTFail("expected the interrupted download to fail")
+        } catch {}
+
+        guard case .failed = model.audio.state(for: record) else {
+            return XCTFail("expected .failed, got \(model.audio.state(for: record))")
+        }
+        XCTAssertNil(AudioStore(directory: audioDirectory).existingURL(forGcsKey: record.audioFile!.gcsKey!))
+        XCTAssertEqual(audioFiles(), [])
+    }
+
+    func testCancelThenRestartDoesNotClobberOrDuplicate() async throws {
+        try signInWithToken()
+        let record = try Self.fixtureRecord()
+        let bytes = Data((0..<80_000).map { UInt8($0 % 239) })
+        let gcsCount = Locked(0)
+        try serveAudioDownload(bytes: bytes, gcsCount: gcsCount)
+        MockURLProtocol.setStreaming(.init(chunkSize: 4_000, pause: 0.02))
+
+        let first = Task { try await model.audio.ensureDownloaded(record) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        model.audio.cancelDownload(for: record)
+        XCTAssertEqual(model.audio.state(for: record), .notDownloaded)
+
+        let second = Task { try await model.audio.ensureDownloaded(record) }
+        _ = try? await first.value
+        guard case .downloading = model.audio.state(for: record) else {
+            return XCTFail("the cancelled download's cleanup clobbered the restart: \(model.audio.state(for: record))")
+        }
+
+        let url = try await second.value
+        XCTAssertEqual(model.audio.state(for: record), .ready(url))
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        XCTAssertEqual(audioFiles(), [url.lastPathComponent])
     }
 
     // MARK: Text editing + push (issue 10)
@@ -595,7 +674,7 @@ final class AppModelTests: XCTestCase {
     func testSignOutWipesEditStateAndAudio() async throws {
         let record = try await signInAndLoadFixtureRecords()
         let storedURL = try AudioStore(directory: audioDirectory)
-            .store(Data("bytes".utf8), gcsKey: record.audioFile!.gcsKey!)
+            .seed(Data("bytes".utf8), gcsKey: record.audioFile!.gcsKey!)
         MockURLProtocol.setHandler { request in
             if request.url?.path.contains("card/v1/update") == true {
                 return MockURLProtocol.error(request.url, status: 500, json: "{}")
