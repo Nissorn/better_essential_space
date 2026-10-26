@@ -26,8 +26,8 @@ Let the user edit a Record's text and push it to Nothing's cloud. `POST storage/
 
 ## UX sketch
 
-- Detail view: inline edit for title (also shown in the sidebar/list), summary block, and each main-topic row (title + content); save button per edit session writes once via one update call.
-- Optimistic local update + background push; on failure keep the edit and surface a retry.
+- Detail view: the page is the editor. Title (also shown in the sidebar/list), summary, and each main-topic title + content edit in place; no sheet, no Save button. Autosave commits on blur or after ~800 ms idle; Escape restores the field's value from when focus arrived.
+- Optimistic local update + background push, at most one update request per Record in flight (later edits coalesce into one follow-up push of the latest document). On failure keep the edit and surface a retry. An unconfirmed edit survives a reload and a relaunch: it is re-applied over the fresh server copy and re-pushed.
 
 ## Done when
 
