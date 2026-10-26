@@ -530,6 +530,22 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(audioFiles(), [url.lastPathComponent])
     }
 
+    func testSessionExpiryWipesDownloadedAudio() async throws {
+        let record = try await signInAndLoadFixtureRecords()
+        let storedURL = try AudioStore(directory: audioDirectory)
+            .seed(Data("bytes".utf8), gcsKey: record.audioFile!.gcsKey!)
+        XCTAssertEqual(model.audio.state(for: record), .ready(storedURL))
+
+        model.accountSession.clearTokens()
+        await model.loadRecords()
+
+        guard case .needsToken = model.phase else {
+            return XCTFail("expected needsToken, got \(model.phase)")
+        }
+        XCTAssertEqual(model.audio.state(for: record), .notDownloaded)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audioDirectory.path), "expiry wipes cached audio like sign-out does")
+    }
+
     // MARK: Text editing + push (issue 10)
 
     private func fixtureCardListJSON() throws -> String {
