@@ -9,17 +9,22 @@ public struct CachedSnapshot: Codable, Equatable, Sendable {
     public var savedAt: Date
     public var records: [Record]
     public var collections: [CollectionSummary]
+    /// Text edits the server has not confirmed yet, by Record id. Optional so
+    /// snapshots written before editing existed still decode.
+    public var pendingEdits: [String: CardTextEdit]?
 
     public init(
         accountUUID: String?,
         savedAt: Date = Date(),
         records: [Record],
-        collections: [CollectionSummary]
+        collections: [CollectionSummary],
+        pendingEdits: [String: CardTextEdit]? = nil
     ) {
         self.accountUUID = accountUUID
         self.savedAt = savedAt
         self.records = records
         self.collections = collections
+        self.pendingEdits = pendingEdits
     }
 }
 

@@ -25,8 +25,8 @@ final class AppModel {
         case otp(maskedEmail: String)
     }
 
-    /// Per-Record push state for text edits (issue 10). AppModel is @MainActor
-    /// and the only writer; the optimistic edit is always already in `records`.
+    /// Per-Record push state for text edits as the UI shows it (issue 10).
+    /// The optimistic edit is always already in `records`.
     enum EditSyncState: Equatable {
         case idle
         case pushing
@@ -58,8 +58,11 @@ final class AppModel {
     private let authflow: AuthflowClient
     private let cacheURL: URL
     private let audioStore: AudioStore
-    private var editSyncStates: [Record.ID: EditSyncState] = [:]
-    private var editPushTasks: [Record.ID: Task<Void, Never>] = [:]
+    /// Edits the server has not confirmed, per Record: the merged delta, so a
+    /// reload can re-apply it over the fresh server copy. Persisted with the
+    /// snapshot so it also survives a relaunch.
+    private var pendingEdits: [Record.ID: CardTextEdit] = [:]
+    private var pushes: [Record.ID: PushState] = [:]
     private var pendingStateToken: String?
     private var loadTask: Task<Void, Never>?
 
@@ -101,6 +104,7 @@ final class AppModel {
         else { return }
         records = snapshot.records
         collections = snapshot.collections
+        pendingEdits = snapshot.pendingEdits ?? [:]
     }
 
     func importTokens(from url: URL) {
@@ -116,11 +120,11 @@ final class AppModel {
     }
 
     func signOut() {
-        for task in editPushTasks.values {
+        for case .inFlight(_, let task) in pushes.values {
             task.cancel()
         }
-        editPushTasks = [:]
-        editSyncStates = [:]
+        pushes = [:]
+        pendingEdits = [:]
         audio.reset()
         audioStore.removeAll()
         accountSession.clearTokens()
@@ -137,64 +141,142 @@ final class AppModel {
 
     // MARK: Text editing (issue 10)
 
+    /// Transport state of one Record's pending edit; absent = nothing in flight
+    /// and nothing failed.
+    private enum PushState {
+        /// At most one update request per Record. `sent` is the document it
+        /// carries, so its completion can tell whether newer edits arrived.
+        case inFlight(sent: String, task: Task<Void, Never>)
+        /// The edit stays in `records` and `pendingEdits`; Retry re-sends it.
+        case failed(String)
+    }
+
     func editSyncState(for id: Record.ID) -> EditSyncState {
-        editSyncStates[id] ?? .idle
+        switch pushes[id] {
+        case nil: .idle
+        case .inFlight: .pushing
+        case .failed(let message): .failed(message)
+        }
     }
 
     /// The single write path (issue 10). Optimistic: the edited Record is
-    /// visible and persisted BEFORE any network. The Record's
-    /// clientRequestResponse is the single source of truth for what the server
-    /// should say — every push and every retry re-sends exactly that value;
-    /// there is no separate pending queue to drift out of sync.
+    /// visible and persisted BEFORE any network. The Record is read from the
+    /// model at commit time, so an edit always lands on the latest local copy.
     /// clientUpdateTime derives from record.updatedAt (stamped by `applying`),
     /// so last-write-wins with the phone app is the server's documented
     /// behaviour expressed through one clock.
-    func save(_ edit: CardTextEdit, for record: Record) {
+    func save(_ edit: CardTextEdit, recordID: Record.ID) {
+        guard let current = records.first(where: { $0.id == recordID }) else { return }
+        let edit = Self.normalized(edit, against: current)
         let updated: Record
         do {
-            updated = try record.applying(edit)
+            updated = try current.applying(edit)
         } catch {
             show(error: error) // a raced edit (a topic vanished in a reload)
             return
         }
+        guard updated.clientRequestResponse != current.clientRequestResponse else { return }
+        pendingEdits[recordID] = pendingEdits[recordID]?.merged(with: edit) ?? edit
         upsert(updated)
         persistSnapshot()
-        pushEdit(of: updated)
+        requestPush(recordID)
     }
 
     /// Retry re-sends the CURRENT optimistic record — no stored payload,
     /// nothing to lose.
     func retryEditPush(for id: Record.ID) {
-        guard let record = records.first(where: { $0.id == id }) else { return }
-        pushEdit(of: record)
+        requestPush(id)
     }
 
-    private func pushEdit(of record: Record) {
-        // A newer edit supersedes the in-flight push; a double-send is
-        // idempotent anyway (the server replaces with identical content).
-        editPushTasks[record.id]?.cancel()
-        editSyncStates[record.id] = .pushing
+    /// Titles are trimmed; a title that trims to empty keeps the current one
+    /// (an empty topic title would also drop the topic from the decode).
+    private static func normalized(_ edit: CardTextEdit, against record: Record) -> CardTextEdit {
+        func trimmed(_ value: String) -> String? {
+            let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+        var edit = edit
+        edit.title = edit.title.flatMap(trimmed)
+        edit.mainTopics = edit.mainTopics?.map { topic in
+            let currentTitle = record.mainTopics.first { $0.id == topic.id }?.title ?? topic.title
+            return MainTopic(id: topic.id, title: trimmed(topic.title) ?? currentTitle, content: topic.content)
+        }
+        return edit
+    }
+
+    private func requestPush(_ id: Record.ID) {
+        if case .inFlight = pushes[id] { return } // its completion sends the newer document
+        startPush(id)
+    }
+
+    private func startPush(_ id: Record.ID) {
+        guard let record = records.first(where: { $0.id == id }) else {
+            pushes[id] = nil
+            return
+        }
         let client = client
-        editPushTasks[record.id] = Task { [weak self] in
+        let task = Task { [weak self] in
+            let result: Result<Card?, Error>
             do {
-                let echo = try await client.updateCard(record)
-                // A save that raced this await owns the state now.
-                guard !Task.isCancelled else { return }
-                await self?.finishEditPush(echo: echo, for: record)
-            } catch is CancellationError {
-                // superseded — the newer push owns the state
+                result = .success(try await client.updateCard(record))
             } catch {
-                guard !Task.isCancelled else { return }
-                self?.editSyncStates[record.id] = .failed(Self.presentableEditError(error))
+                result = .failure(error)
             }
+            guard !Task.isCancelled else { return } // signed out meanwhile
+            self?.finishPush(of: record, result: result)
+        }
+        pushes[id] = .inFlight(sent: record.clientRequestResponse, task: task)
+    }
+
+    private func finishPush(of sent: Record, result: Result<Card?, Error>) {
+        let id = sent.id
+        pushes[id] = nil
+        let isLatest = records.first { $0.id == id }?.clientRequestResponse == sent.clientRequestResponse
+        switch result {
+        case .failure(let error):
+            if pendingEdits[id] != nil {
+                pushes[id] = .failed(Self.presentableEditError(error))
+            }
+        case .success(let echo) where isLatest:
+            // The server echo wins when it decodes; the pushed value always lands.
+            pendingEdits[id] = nil
+            upsert(echo.flatMap { try? Record(card: $0) } ?? sent)
+            persistSnapshot()
+        case .success:
+            // Newer edits arrived while this request was in flight: send them
+            // now, and drop this echo so it cannot overwrite them.
+            if pendingEdits[id] != nil { startPush(id) }
         }
     }
 
-    private func finishEditPush(echo: Card?, for record: Record) {
-        // The server echo wins when it decodes; the pushed value always lands.
-        upsert(echo.flatMap { try? Record(card: $0) } ?? record)
-        persistSnapshot()
-        editSyncStates[record.id] = .idle
+    /// A reload must not silently discard an edit the server has not
+    /// confirmed: each pending edit is re-applied over the fresh server copy,
+    /// and dropped once that copy already says the same.
+    private func rebasingPendingEdits(onto fetched: [Record]) -> [Record] {
+        var rebased = fetched
+        for (id, edit) in pendingEdits {
+            guard let index = rebased.firstIndex(where: { $0.id == id }) else {
+                dropPendingEdit(id) // the Record left the account
+                continue
+            }
+            do {
+                let edited = try rebased[index].applying(edit)
+                if edited.clientRequestResponse == rebased[index].clientRequestResponse {
+                    dropPendingEdit(id)
+                } else {
+                    rebased[index] = edited
+                }
+            } catch {
+                dropPendingEdit(id)
+                show(error: error)
+            }
+        }
+        return rebased
+    }
+
+    private func dropPendingEdit(_ id: Record.ID) {
+        pendingEdits[id] = nil
+        if case .failed = pushes[id] { pushes[id] = nil }
     }
 
     private func upsert(_ record: Record) {
@@ -294,7 +376,12 @@ final class AppModel {
     private func persistSnapshot() {
         guard let accountUUID = accountSession.claims?.uuid else { return }
         try? RecordCache.save(
-            CachedSnapshot(accountUUID: accountUUID, records: records, collections: collections),
+            CachedSnapshot(
+                accountUUID: accountUUID,
+                records: records,
+                collections: collections,
+                pendingEdits: pendingEdits.isEmpty ? nil : pendingEdits
+            ),
             to: cacheURL
         )
     }
@@ -313,8 +400,11 @@ final class AppModel {
                 }
                 pageNo += 1
             }
-            records = fetched.sorted { $0.createdAt > $1.createdAt }
+            records = rebasingPendingEdits(onto: fetched.sorted { $0.createdAt > $1.createdAt })
             lastError = nil
+            for id in pendingEdits.keys {
+                requestPush(id)
+            }
         } catch is CancellationError {
             // superseded by a newer load — keep whatever state it left
         } catch {

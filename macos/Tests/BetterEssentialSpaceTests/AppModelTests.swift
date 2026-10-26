@@ -34,6 +34,11 @@ final class AppModelTests: XCTestCase {
         MockURLProtocol.setHandler { request in
             Self.route(request, otpAction: "verify", tokenStatus: 200)
         }
+        model = Self.makeModel(keychain: keychain, cacheURL: cacheURL, audioDirectory: audioDirectory)
+    }
+
+    /// A model over this test's Keychain and cache, as a relaunch would build it.
+    private static func makeModel(keychain: KeychainStore, cacheURL: URL, audioDirectory: URL) -> AppModel {
         let session = AccountSession(
             keychain: keychain,
             urlSession: MockURLProtocol.makeSession(),
@@ -47,7 +52,7 @@ final class AppModelTests: XCTestCase {
         ]
         let keyPair = SecKeyCreateRandomKey(rsaAttributes as CFDictionary, nil)!
         nonisolated(unsafe) let claimKey = SecKeyCopyPublicKey(keyPair)!
-        model = AppModel(
+        return AppModel(
             accountSession: session,
             authflow: AuthflowClient(
                 urlSessionConfiguration: MockURLProtocol.makeConfiguration(),
@@ -518,7 +523,7 @@ final class AppModelTests: XCTestCase {
             return Self.route(request, otpAction: "finished", tokenStatus: 200)
         }
 
-        model.save(CardTextEdit(title: "Edited Title", summary: nil, mainTopics: nil), for: record)
+        model.save(CardTextEdit(title: "Edited Title"), recordID: record.id)
 
         // Optimistic: the edit is visible before any network round-trip.
         XCTAssertEqual(model.records.first?.title, "Edited Title")
@@ -550,7 +555,7 @@ final class AppModelTests: XCTestCase {
             return Self.route(request, otpAction: "finished", tokenStatus: 200)
         }
 
-        model.save(CardTextEdit(title: "Edited Title", summary: nil, mainTopics: nil), for: record)
+        model.save(CardTextEdit(title: "Edited Title"), recordID: record.id)
         try await waitForEditState(record) {
             if case .failed = $0 { return true }
             return false
@@ -570,26 +575,129 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.records.first?.title, "Edited Title")
     }
 
-    func testNewerSaveSupersedesInFlightPush() async throws {
-        let record = try await signInAndLoadFixtureRecords()
-        let echoJSON = try updateEchoJSON(cardId: record.id, title: "Slow Echo")
+    /// The title inside a captured `card/v1/update` body: what the server stores.
+    nonisolated private static func pushedTitle(_ request: URLRequest) -> String? {
+        guard let body = request.bodyStreamData,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let card = (object["cards"] as? [[String: Any]])?.first,
+              let raw = card["client_request_response"] as? String,
+              let payload = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any]
+        else { return nil }
+        return (payload["cards"] as? [String: Any])?["title"] as? String
+    }
+
+    /// Serves the fixture list and an update endpoint that records every pushed
+    /// title.
+    private func serveUpdates(
+        delay: Double = 0,
+        fail: Locked<Bool> = Locked(false),
+        pushedTitles: Locked<[String]>
+    ) throws {
+        let cardListJSON = try fixtureCardListJSON()
         MockURLProtocol.setHandler { request in
             if request.url?.path.contains("card/v1/update") == true {
-                Thread.sleep(forTimeInterval: 0.2)
-                return MockURLProtocol.ok(request.url, json: echoJSON)
+                pushedTitles.with { $0.append(Self.pushedTitle(request) ?? "<none>") }
+                Thread.sleep(forTimeInterval: delay)
+                if fail.get() {
+                    return MockURLProtocol.error(request.url, status: 500, json: #"{"code":"999999","msg":"boom"}"#)
+                }
+                return MockURLProtocol.ok(request.url, json: #"{"code":"00000","msg":"success","data":[]}"#)
+            }
+            if request.url?.path.contains("card/v1/list") == true {
+                return MockURLProtocol.ok(request.url, json: cardListJSON)
             }
             return Self.route(request, otpAction: "finished", tokenStatus: 200)
         }
+    }
 
-        model.save(CardTextEdit(title: "First", summary: nil, mainTopics: nil), for: record)
-        XCTAssertEqual(model.records.first?.title, "First")
-        model.save(CardTextEdit(title: "Second", summary: nil, mainTopics: nil), for: record)
-        XCTAssertEqual(model.records.first?.title, "Second")
+    func testRapidSavesCoalesceIntoAtMostTwoPushesEndingWithLatest() async throws {
+        let record = try await signInAndLoadFixtureRecords()
+        let pushedTitles = Locked<[String]>([])
+        try serveUpdates(delay: 0.2, pushedTitles: pushedTitles)
+
+        for title in ["T", "Th", "The", "The latest"] {
+            model.save(CardTextEdit(title: title), recordID: record.id)
+        }
+        XCTAssertEqual(model.records.first?.title, "The latest")
 
         try await waitForEditState(record) { $0 == .idle }
-        // The superseded push must not apply its echo; the newer push owns the outcome.
-        XCTAssertEqual(model.records.first?.title, "Slow Echo")
+        XCTAssertLessThanOrEqual(pushedTitles.get().count, 2)
+        XCTAssertEqual(pushedTitles.get().last, "The latest")
+        XCTAssertEqual(model.records.first?.title, "The latest", "an older push never lands over newer text")
+    }
+
+    func testNoOpSaveSendsNoRequest() async throws {
+        let record = try await signInAndLoadFixtureRecords()
+        let pushedTitles = Locked<[String]>([])
+        try serveUpdates(pushedTitles: pushedTitles)
+
+        model.save(CardTextEdit(title: record.title, summary: record.summary), recordID: record.id)
+        model.save(CardTextEdit(mainTopics: record.mainTopics), recordID: record.id)
         XCTAssertEqual(model.editSyncState(for: record.id), .idle)
+
+        // A real change does push, so the counter can see one.
+        model.save(CardTextEdit(title: "Changed"), recordID: record.id)
+        try await waitForEditState(record) { $0 == .idle }
+        XCTAssertEqual(pushedTitles.get(), ["Changed"])
+    }
+
+    func testTitleIsTrimmedAndAnEmptyTitleReverts() async throws {
+        let record = try await signInAndLoadFixtureRecords()
+        let pushedTitles = Locked<[String]>([])
+        try serveUpdates(pushedTitles: pushedTitles)
+
+        model.save(CardTextEdit(title: "   \n "), recordID: record.id)
+        XCTAssertEqual(model.records.first?.title, record.title)
+        XCTAssertEqual(model.editSyncState(for: record.id), .idle)
+
+        model.save(CardTextEdit(title: "  Trimmed title \n"), recordID: record.id)
+        XCTAssertEqual(model.records.first?.title, "Trimmed title")
+        try await waitForEditState(record) { $0 == .idle }
+        XCTAssertEqual(pushedTitles.get(), ["Trimmed title"])
+    }
+
+    func testReloadKeepsAPendingEditAndPushesIt() async throws {
+        let record = try await signInAndLoadFixtureRecords()
+        let pushedTitles = Locked<[String]>([])
+        let fail = Locked(true)
+        try serveUpdates(fail: fail, pushedTitles: pushedTitles)
+
+        model.save(CardTextEdit(title: "Unconfirmed"), recordID: record.id)
+        try await waitForEditState(record) {
+            if case .failed = $0 { return true }
+            return false
+        }
+
+        // The server copy still carries the old title; the reload must not win.
+        fail.set(false)
+        await model.loadAll()
+        XCTAssertEqual(model.records.first { $0.id == record.id }?.title, "Unconfirmed")
+        try await waitForEditState(record) { $0 == .idle }
+        XCTAssertEqual(pushedTitles.get(), ["Unconfirmed", "Unconfirmed"])
+        XCTAssertEqual(model.records.first { $0.id == record.id }?.title, "Unconfirmed")
+    }
+
+    func testPendingEditSurvivesRelaunchAndIsPushed() async throws {
+        let record = try await signInAndLoadFixtureRecords()
+        let pushedTitles = Locked<[String]>([])
+        let fail = Locked(true)
+        try serveUpdates(fail: fail, pushedTitles: pushedTitles)
+
+        model.save(CardTextEdit(title: "Offline edit"), recordID: record.id)
+        try await waitForEditState(record) {
+            if case .failed = $0 { return true }
+            return false
+        }
+
+        fail.set(false)
+        model = Self.makeModel(keychain: keychain, cacheURL: cacheURL, audioDirectory: audioDirectory)
+        model.bootstrap()
+        XCTAssertEqual(model.records.first { $0.id == record.id }?.title, "Offline edit", "cached snapshot")
+        for _ in 0..<200 where pushedTitles.get().count < 2 || model.editSyncState(for: record.id) != .idle {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(pushedTitles.get(), ["Offline edit", "Offline edit"])
+        XCTAssertEqual(model.records.first { $0.id == record.id }?.title, "Offline edit")
     }
 
     func testSignOutWipesEditStateAndAudio() async throws {
@@ -602,7 +710,7 @@ final class AppModelTests: XCTestCase {
             }
             return Self.route(request, otpAction: "finished", tokenStatus: 200)
         }
-        model.save(CardTextEdit(title: "Doomed", summary: nil, mainTopics: nil), for: record)
+        model.save(CardTextEdit(title: "Doomed"), recordID: record.id)
         try await waitForEditState(record) {
             if case .failed = $0 { return true }
             return false

@@ -448,7 +448,7 @@ struct RecordDetail: View {
         }
         .sheet(isPresented: $showEditSheet) {
             EditTextSheet(record: record) { edit in
-                model.save(edit, for: record)
+                model.save(edit, recordID: record.id)
             }
         }
     }
