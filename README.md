@@ -1,22 +1,22 @@
 # Better Essential Space
 
-An unofficial, **read-only** macOS client for Nothing's Essential Space: sign in with your Nothing account and read your voice Records — transcripts, summaries, topics — on your Mac.
+An unofficial macOS client for Nothing's Essential Space: sign in with your Nothing account to read, listen to, and edit your voice Records — transcripts, summaries, topics, audio — on your Mac.
 
 > [!IMPORTANT]
-> This is a hobby project, not affiliated with or endorsed by Nothing Technology Ltd. It talks to undocumented, reverse-engineered APIs (research notes in [`notes/`](notes/)). Nothing may change or block them at any time, and using an unofficial client may violate their Terms of Service. Your account, your risk. The app itself is strictly read-only — it never creates, edits, or deletes anything in your Essential Space.
+> This is a hobby project, not affiliated with or endorsed by Nothing Technology Ltd. It talks to undocumented, reverse-engineered APIs (research notes in [`notes/`](notes/)). Nothing may change or block them at any time, and using an unofficial client may violate their Terms of Service. Your account, your risk. The app writes to your Essential Space only when you edit a Record's title, summary, or main topics; it never creates or deletes anything.
 
 ## What works
 
 - **Native sign-in** — email + password + OTP, the same Authflow the phone app uses. No browser, no token files. Your tokens live in your Mac's Keychain and refresh automatically.
 - **Records** — browse your Essential Space: titles, dates, durations, summaries, main topics, full transcripts.
+- **Audio** — tap Play to download a Record's recording with a progress bar; it plays as soon as it lands and stays cached on your Mac.
+- **Inline editing** — click a title, summary, or main topic and type; changes save automatically and sync to the phone.
 - **Collections** — the Collections you made on the phone, with counts and one-click filtering in the sidebar.
 - **Search** — instant, client-side, across every text field of every Record (⌘F).
 - **Export** — Copy as Markdown, or export one Record / everything as `.md` (File menu, ⌘E).
 - **Instant start** — the last snapshot loads immediately and refreshes in the background.
 - **A quiet, readable UI** — adaptive light/dark appearance (System / Light / Dark), gradient accents, Doto + Geist typography, copy-to-clipboard everywhere.
 - **No servers, no telemetry** — the app talks directly to Nothing's endpoints; nothing passes through anyone else's hands.
-
-**Known limitation:** audio playback is not working yet — the media host rejects non-genuine clients ([notes/03](notes/03-es-sync-capture.md)).
 
 ## Requirements
 
