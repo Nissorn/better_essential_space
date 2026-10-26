@@ -70,6 +70,7 @@ struct ContentView: View {
             Group {
                 if let record = model.records.first(where: { $0.id == selection }) {
                     RecordDetail(record: record, collectionNames: model.collectionNames(for: record))
+                        .id(record.id)
                 } else {
                     ContentUnavailableView(
                         "Select a Record",

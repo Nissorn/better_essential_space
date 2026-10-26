@@ -2,9 +2,9 @@ import AVFoundation
 import BetterEssentialSpaceCore
 import SwiftUI
 
-/// The "Audio" card body (issue 09): renders AudioLibrary's download state
-/// machine — download button with the recording's size, spinner + cancel
-/// while fetching, a player once the file is local, retry after a failure.
+/// The "Audio" card body: one tap on Play does whatever is missing. Cached
+/// files play at once; otherwise the tap downloads (progress bar, Cancel) and
+/// playback starts when the file lands. Renders AudioLibrary's state machine.
 struct AudioCardView: View {
     let record: Record
     let library: AudioLibrary
@@ -12,27 +12,44 @@ struct AudioCardView: View {
     /// View-lifetime by design: playback stops on navigation and player ticks
     /// churn this object only, never AppModel or AudioLibrary.
     @State private var player = RecordPlayer()
+    /// The tap-initiated "download, then play" flow. Cancelled on disappear, so
+    /// a download that finishes after the user moved on never starts playback.
+    @State private var playTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             switch library.state(for: record) {
             case .notDownloaded:
-                Button {
-                    Task { try? await library.ensureDownloaded(record) }
-                } label: {
-                    Label(downloadLabel, systemImage: "arrow.down.circle")
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(action: playTapped) {
+                        Label("Play", systemImage: "play.fill")
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                    if let size = record.audioSizeBytes {
+                        Text("Downloads \(size.formatted(.byteCount(style: .file))) on first play")
+                            .font(ND.ui(12))
+                            .foregroundStyle(ND.textTertiary)
+                    }
                 }
-                .buttonStyle(SecondaryButtonStyle())
 
-            case .downloading:
+            case .downloading(let progress):
                 HStack(spacing: 12) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Downloading…")
-                        .font(ND.ui(14))
+                    // Two views, not one with an optional value: AppKit's
+                    // progress indicator stays indeterminate when a live
+                    // ProgressView gains a value.
+                    if let progress {
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
+                    Text(progress.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "Downloading…")
+                        .font(ND.mono(12))
+                        .monospacedDigit()
                         .foregroundStyle(ND.textSecondary)
-                    Spacer()
                     Button("Cancel") {
+                        playTask?.cancel()
                         library.cancelDownload(for: record)
                     }
                     .buttonStyle(SecondaryButtonStyle())
@@ -46,29 +63,37 @@ struct AudioCardView: View {
                     Label(message, systemImage: "exclamationmark.triangle")
                         .font(ND.ui(14))
                         .foregroundStyle(ND.error)
-                    Button {
-                        Task { try? await library.ensureDownloaded(record) }
-                    } label: {
-                        Label("Retry download", systemImage: "arrow.clockwise")
+                    Button(action: playTapped) {
+                        Label("Retry", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(SecondaryButtonStyle())
                 }
             }
         }
         .padding(.top, 14)
-        .onDisappear { player.stop() }
+        .onDisappear {
+            playTask?.cancel()
+            player.stop()
+        }
     }
 
-    private var downloadLabel: String {
-        let size = record.audioSizeBytes.map { $0.formatted(.byteCount(style: .file)) } ?? "audio"
-        return "Download audio (\(size))"
+    private var fallbackDuration: Double? {
+        record.audioDurationMS.map { Double($0) / 1000 }
+    }
+
+    private func playTapped() {
+        playTask?.cancel()
+        playTask = Task {
+            guard let url = try? await library.ensureDownloaded(record), !Task.isCancelled else { return }
+            player.play(fileURL: url, fallbackDuration: fallbackDuration)
+        }
     }
 
     private func playerControls(url: URL) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
                 Button {
-                    player.hasAudio ? player.toggle() : player.play(fileURL: url)
+                    player.hasAudio ? player.toggle() : player.play(fileURL: url, fallbackDuration: fallbackDuration)
                 } label: {
                     Label(
                         player.isPlaying ? "Pause" : "Play",
@@ -93,6 +118,11 @@ struct AudioCardView: View {
                 )
                 .tint(ND.accent)
             }
+            if let message = player.errorMessage {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(ND.ui(13))
+                    .foregroundStyle(ND.error)
+            }
         }
     }
 
@@ -110,6 +140,8 @@ final class RecordPlayer {
     private(set) var hasAudio = false
     private(set) var positionSeconds: Double = 0
     private(set) var durationSeconds: Double?
+    /// Set when the item failed to load or play; cleared by the next `play`.
+    private(set) var errorMessage: String?
 
     // Observer cleanup also runs from deinit (a nonisolated context), so the
     // handles are deliberately unchecked for isolation; every other access is
@@ -117,14 +149,33 @@ final class RecordPlayer {
     nonisolated(unsafe) private var avPlayer: AVPlayer?
     nonisolated(unsafe) private var timeObserver: Any?
     nonisolated(unsafe) private var endObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var statusObserver: NSKeyValueObservation?
+    private var durationTask: Task<Void, Never>?
+    private var generation = 0
 
-    /// Loads the local file and starts playback from the beginning.
-    func play(fileURL: URL) {
+    /// Loads the local file and starts playback from the beginning. A freshly
+    /// created item reports an indefinite duration, so the slider range starts
+    /// from the Record's own metadata and is replaced by the asset's real
+    /// duration once it loads.
+    func play(fileURL: URL, fallbackDuration: Double?) {
         stop()
-        let player = AVPlayer(url: fileURL)
+        let current = generation
+        let asset = AVURLAsset(url: fileURL)
+        let item = AVPlayerItem(asset: asset)
+        let player = AVPlayer(playerItem: item)
         avPlayer = player
         hasAudio = true
-        durationSeconds = Self.seconds(of: player.currentItem?.duration)
+        durationSeconds = fallbackDuration
+        statusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            Task { @MainActor in self?.fail(generation: current) }
+        }
+        durationTask = Task { [weak self] in
+            guard let duration = try? await asset.load(.duration),
+                  let seconds = Self.seconds(of: duration)
+            else { return }
+            self?.adoptDuration(seconds, generation: current)
+        }
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
             queue: .main
@@ -135,7 +186,7 @@ final class RecordPlayer {
         }
         endObserver = NotificationCenter.default.addObserver(
             forName: AVPlayerItem.didPlayToEndTimeNotification,
-            object: player.currentItem,
+            object: item,
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -172,7 +223,13 @@ final class RecordPlayer {
     }
 
     /// Removes every observer and the player itself (called on disappear).
+    /// Bumping `generation` orphans any in-flight duration load or status callback.
     func stop() {
+        generation += 1
+        durationTask?.cancel()
+        durationTask = nil
+        statusObserver?.invalidate()
+        statusObserver = nil
         if let timeObserver {
             avPlayer?.removeTimeObserver(timeObserver)
         }
@@ -187,9 +244,22 @@ final class RecordPlayer {
         isPlaying = false
         positionSeconds = 0
         durationSeconds = nil
+        errorMessage = nil
+    }
+
+    private func adoptDuration(_ seconds: Double, generation: Int) {
+        guard generation == self.generation else { return }
+        durationSeconds = seconds
+    }
+
+    private func fail(generation: Int) {
+        guard generation == self.generation else { return }
+        stop()
+        errorMessage = "This recording can't be played."
     }
 
     deinit {
+        statusObserver?.invalidate()
         if let timeObserver {
             avPlayer?.removeTimeObserver(timeObserver)
         }
@@ -198,8 +268,8 @@ final class RecordPlayer {
         }
     }
 
-    private static func seconds(of duration: CMTime?) -> Double? {
-        guard let duration, duration.isNumeric, duration.seconds.isFinite, duration.seconds > 0 else {
+    private static func seconds(of duration: CMTime) -> Double? {
+        guard duration.isNumeric, duration.seconds.isFinite, duration.seconds > 0 else {
             return nil
         }
         return duration.seconds

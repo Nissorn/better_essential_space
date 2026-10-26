@@ -5,7 +5,7 @@ import Foundation
 /// by hash, never used as paths, so there is no sanitization logic to get wrong.
 /// The bytes are an MP4/M4A container whatever the `.aac` gcsKey suffix claims
 /// (live-verified, notes/04); the extension is fixed and AVPlayer is
-/// extension-agnostic. Every write is atomic, so the only disk states are
+/// extension-agnostic. Files arrive by atomic move, so the only disk states are
 /// "fully downloaded" or absent — an interrupted download leaves nothing behind.
 public struct AudioStore: Sendable {
     public let directory: URL
@@ -26,14 +26,21 @@ public struct AudioStore: Sendable {
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
-    /// Atomic and idempotent — storing the same bytes for the same key again
-    /// simply rewrites the same file. `.atomic` leaves the previous complete
-    /// file untouched when a write fails; a partial file never exists.
+    /// Moves a fully downloaded temp file to its final hash name. The final
+    /// name only ever holds a complete file: `moveItem`/`replaceItemAt` are
+    /// atomic renames, so an interrupted download (which never reaches this
+    /// call) leaves nothing at the final name. Re-storing the same key
+    /// replaces the previous complete file in one step.
     @discardableResult
-    public func store(_ data: Data, gcsKey: String) throws -> URL {
+    public func store(fileAt tempURL: URL, gcsKey: String) throws -> URL {
         let destination = fileURL(forGcsKey: gcsKey)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try data.write(to: destination, options: .atomic)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: destination.path) {
+            _ = try fileManager.replaceItemAt(destination, withItemAt: tempURL)
+        } else {
+            try fileManager.moveItem(at: tempURL, to: destination)
+        }
         return destination
     }
 

@@ -13,14 +13,22 @@ final class AudioLibrary {
     /// the Audio card when `record.audioFile == nil`.
     enum DownloadState: Equatable {
         case notDownloaded
-        case downloading
+        /// `progress` is nil until Content-Length is known (indeterminate).
+        case downloading(progress: Double?)
         case ready(URL)
         /// User-presentable message; Retry re-enters `ensureDownloaded`.
         case failed(String)
     }
 
     private var states: [String: DownloadState] = [:]
-    private var downloads: [String: Task<URL, Error>] = [:]
+    /// `id` is the task's identity: a cancelled or superseded download must not
+    /// touch the entry or state a newer download for the same gcsKey owns.
+    private struct Download {
+        let id: UUID
+        let task: Task<URL, Error>
+    }
+
+    private var downloads: [String: Download] = [:]
     private let client: ESClient
     private let store: AudioStore
 
@@ -36,6 +44,9 @@ final class AudioLibrary {
         if let url = store.existingURL(forGcsKey: gcsKey) {
             return .ready(url)
         }
+        // A remembered .ready whose file has since vanished (wiped, deleted
+        // outside the app) is stale: the next Play must download again.
+        if case .ready? = states[gcsKey] { return .notDownloaded }
         return states[gcsKey] ?? .notDownloaded
     }
 
@@ -49,32 +60,54 @@ final class AudioLibrary {
             throw ESError.invalidResponse("this Record has no audio file to download")
         }
         if let url = store.existingURL(forGcsKey: gcsKey) { return url }
-        if let existing = downloads[gcsKey] { return try await existing.value }
+        if let existing = downloads[gcsKey] { return try await existing.task.value }
 
-        states[gcsKey] = .downloading
-        // Detached: the multi-MB atomic write must not run on the main actor.
-        let download = Task.detached(priority: .userInitiated) { [client, store] in
-            let data = try await client.downloadAudio(for: file)
-            return try store.store(data, gcsKey: gcsKey)
+        states[gcsKey] = .downloading(progress: nil)
+        let id = UUID()
+        // Detached: the multi-MB move and file IO must not run on the main actor.
+        let task = Task.detached(priority: .userInitiated) { [client, store, weak self] in
+            let tempURL = try await client.downloadAudio(for: file) { fraction in
+                Task { @MainActor in self?.updateProgress(fraction, gcsKey: gcsKey, id: id) }
+            }
+            do {
+                try Task.checkCancellation()
+                return try store.store(fileAt: tempURL, gcsKey: gcsKey)
+            } catch {
+                try? FileManager.default.removeItem(at: tempURL)
+                throw error
+            }
         }
-        downloads[gcsKey] = download
-        defer { downloads[gcsKey] = nil }
+        downloads[gcsKey] = Download(id: id, task: task)
         do {
-            let url = try await download.value
-            states[gcsKey] = .ready(url)
+            let url = try await task.value
+            finish(gcsKey: gcsKey, id: id, state: .ready(url))
             return url
         } catch is CancellationError {
-            states[gcsKey] = .notDownloaded
+            finish(gcsKey: gcsKey, id: id, state: .notDownloaded)
             throw CancellationError()
         } catch {
-            states[gcsKey] = .failed(Self.presentable(error))
+            finish(gcsKey: gcsKey, id: id, state: .failed(Self.presentable(error)))
             throw error
         }
     }
 
+    /// Progress only moves forward: callbacks hop to the main actor as separate
+    /// tasks, so a late small value must not rewind the bar.
+    private func updateProgress(_ fraction: Double?, gcsKey: String, id: UUID) {
+        guard downloads[gcsKey]?.id == id, case .downloading(let current) = states[gcsKey] else { return }
+        if let fraction, fraction < (current ?? 0) { return }
+        states[gcsKey] = .downloading(progress: fraction)
+    }
+
+    private func finish(gcsKey: String, id: UUID, state: DownloadState) {
+        guard downloads[gcsKey]?.id == id else { return }
+        downloads[gcsKey] = nil
+        states[gcsKey] = state
+    }
+
     func cancelDownload(for record: Record) {
         guard let gcsKey = record.audioFile?.gcsKey else { return }
-        downloads[gcsKey]?.cancel()
+        downloads[gcsKey]?.task.cancel()
         downloads[gcsKey] = nil
         if states[gcsKey] != nil {
             states[gcsKey] = .notDownloaded
@@ -85,7 +118,7 @@ final class AudioLibrary {
     /// caller owns wiping the store itself (AppModel.signOut).
     func reset() {
         for download in downloads.values {
-            download.cancel()
+            download.task.cancel()
         }
         downloads = [:]
         states = [:]

@@ -401,6 +401,8 @@ final class AppModel {
     private func handle(_ error: Error) {
         if error is CancellationError { return }
         if isSessionExpired(error) {
+            audio.reset()
+            audioStore.removeAll()
             accountSession.clearTokens()
             RecordCache.remove(at: cacheURL)
             records = []

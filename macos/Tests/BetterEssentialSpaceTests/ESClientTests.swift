@@ -288,8 +288,9 @@ final class ESClientTests: XCTestCase {
             )
         }
 
-        let data = try await client.downloadAudio(for: Self.audioFile)
-        XCTAssertEqual(data, audioBytes)
+        let fileURL = try await client.downloadAudio(for: Self.audioFile)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        XCTAssertEqual(try Data(contentsOf: fileURL), audioBytes)
 
         // The sign POST carries the three legacy auth headers and the exact body.
         let post = try XCTUnwrap(signRequest.get())
@@ -335,10 +336,70 @@ final class ESClientTests: XCTestCase {
             return MockURLProtocol.ok(request.url, json: String(decoding: Data("after-resign".utf8), as: UTF8.self))
         }
 
-        let data = try await client.downloadAudio(for: Self.audioFile)
-        XCTAssertEqual(String(decoding: data, as: UTF8.self), "after-resign")
+        let fileURL = try await client.downloadAudio(for: Self.audioFile)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        XCTAssertEqual(String(decoding: try Data(contentsOf: fileURL), as: UTF8.self), "after-resign")
         XCTAssertEqual(signCount.get(), 2, "an expired signature triggers exactly one re-sign")
         XCTAssertEqual(gcsCount.get(), 2)
+    }
+
+    func testDownloadAudioReportsProgressAndDeliversTheCompleteFile() async throws {
+        try signIn()
+        let fixture = try cardFilesFixtureJSON()
+        let audioBytes = Data((0..<200_000).map { UInt8($0 % 251) })
+        MockURLProtocol.setStreaming(.init(chunkSize: 10_000))
+        MockURLProtocol.setHandler { request in
+            if request.url?.path.contains("storage/card/v1/files") == true {
+                return MockURLProtocol.ok(request.url, json: fixture)
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Length": String(audioBytes.count)]
+                )!,
+                audioBytes
+            )
+        }
+
+        let reports = Locked<[Double?]>([])
+        let fileURL = try await client.downloadAudio(for: Self.audioFile) { fraction in
+            reports.with { $0.append(fraction) }
+        }
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), audioBytes, "the temp file is the complete body")
+        let fractions = reports.get().compactMap { $0 }
+        XCTAssertTrue(fractions.contains { $0 > 0 && $0 < 1 }, "mid-download progress was reported: \(fractions)")
+        XCTAssertEqual(fractions, fractions.sorted(), "progress never goes backwards")
+        XCTAssertEqual(fractions.last, 1)
+    }
+
+    func testDownloadAudioInterruptedBodyThrowsAndLeavesNoFile() async throws {
+        try signIn()
+        let fixture = try cardFilesFixtureJSON()
+        let tempBefore = Set(try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()))
+        MockURLProtocol.setStreaming(.init(chunkSize: 1_000, failAfterChunks: 3))
+        MockURLProtocol.setHandler { request in
+            if request.url?.path.contains("storage/card/v1/files") == true {
+                return MockURLProtocol.ok(request.url, json: fixture)
+            }
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Length": "50000"])!,
+                Data(count: 50_000)
+            )
+        }
+
+        do {
+            _ = try await client.downloadAudio(for: Self.audioFile)
+            XCTFail("a connection lost mid-body must throw")
+        } catch {
+            guard case ESError.requestFailed = error else {
+                return XCTFail("expected requestFailed, got \(error)")
+            }
+        }
+        let leaked = Set(try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()))
+            .subtracting(tempBefore).filter { $0.hasPrefix("CFNetworkDownload") || $0.hasPrefix("essential-space-audio-") }
+        XCTAssertTrue(leaked.isEmpty, "no partial temp file survives: \(leaked)")
     }
 
     func testDownloadAudioGCS404SurfacesAsHTTPStatus() async throws {
