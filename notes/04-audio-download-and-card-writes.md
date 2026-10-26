@@ -18,7 +18,7 @@ The chain (all three steps verified live, HTTP 200):
 2. POST storage/card/v1/files
    headers: Authorization / timestamp / auth (same as all legacy writes+reads)
    body:    {"files":[{"region":"asia-south1","gcsKey":"audioRequest/<md5(uuid)>/<cardId>/<resId>.aac"}]}
-   → 200 {"code":"00000","data":[{"region":…,"gcsKey":…,"signUrl":"https://storage.googleapis.com/essential-space-gcs-asia-south1/storage/<gcsKey>?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Expires=…&X-Goog-Signature=…"}]}
+   → 200 {"code":"00000","data":[{"region":…,"gcsKey":…,"signUrl":"https://storage.googleapis.com/essential-space-gcs-asia-south1/storage/<gcsKey>?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Expires=604800&X-Goog-Signature=…"}]}
 
 3. GET <signUrl>   (no Authorization header — the signature is in the URL)
    → 200, the audio bytes
@@ -92,4 +92,4 @@ Swift implementation notes: both primitives exist in Apple frameworks without th
 
 - The main topics come from `card_resources[]` with `raw_type` `MEETING_MAIN_TOPIC` / `MEETING_KEY_TOPIC_ANALYSIS`; editing them is the same update call, but the macOS UI needs edit affordances per resource type (issue 10).
 - Recreating a Card's audio upload path (Recorder → S3/GCS) is out of scope; the client only downloads.
-- Sign-URL TTL is governed by `X-Goog-Expires` in the response (~1 h observed); the client should re-request rather than cache long-term.
+- Sign-URL TTL is `X-Goog-Expires=604800` (7 days, measured live 2026-10-26). The client still never persists a signUrl: it signs per download and re-signs once on a GCS 403, which covers an expired signature.
