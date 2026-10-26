@@ -421,6 +421,18 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.audio.state(for: record), .ready(cached))
     }
 
+    func testAudioFileDeletedFromDiskReadsAsNotDownloaded() async throws {
+        try signInWithToken()
+        let record = try Self.fixtureRecord()
+        try serveAudioDownload(bytes: Data("bytes".utf8))
+        let url = try await model.audio.ensureDownloaded(record)
+        XCTAssertEqual(model.audio.state(for: record), .ready(url))
+
+        AudioStore(directory: audioDirectory).removeAll()
+
+        XCTAssertEqual(model.audio.state(for: record), .notDownloaded, "a stale .ready must not offer a player for a missing file")
+    }
+
     func testAudioFailureStateOffersRetry() async throws {
         try signInWithToken()
         let record = try Self.fixtureRecord()

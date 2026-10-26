@@ -44,6 +44,9 @@ final class AudioLibrary {
         if let url = store.existingURL(forGcsKey: gcsKey) {
             return .ready(url)
         }
+        // A remembered .ready whose file has since vanished (wiped, deleted
+        // outside the app) is stale: the next Play must download again.
+        if case .ready? = states[gcsKey] { return .notDownloaded }
         return states[gcsKey] ?? .notDownloaded
     }
 
