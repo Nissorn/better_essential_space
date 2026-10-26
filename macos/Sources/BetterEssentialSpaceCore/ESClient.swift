@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// One client for the two Essential Space hosts (notes/03):
 ///
@@ -18,15 +19,29 @@ public struct ESClient: Sendable {
     public let accountSession: AccountSession
     public let urlSession: URLSession
     public let legacyKeyProvider: @Sendable () throws -> String
+    /// Seals the write envelope's cipherKey (issue 10). Disk-only secret — no
+    /// bundled fallback, by decision.
+    public let claimKeyProvider: @Sendable () throws -> SecKey
+    /// The deviceId the write envelope covers. The server does not validate it
+    /// (the live probe used a stand-in), but the honest value is the
+    /// registered device id, falling back to this install's stable UUID.
+    public let deviceIdProvider: @Sendable () throws -> String
 
     public init(
         accountSession: AccountSession,
         urlSession: URLSession = .shared,
-        legacyKeyProvider: @escaping @Sendable () throws -> String = { try RuntimeSecrets.legacyAPIKey() }
+        legacyKeyProvider: @escaping @Sendable () throws -> String = { try RuntimeSecrets.legacyAPIKey() },
+        claimKeyProvider: @escaping @Sendable () throws -> SecKey = { try RuntimeSecrets.claimKey() },
+        deviceIdProvider: (@Sendable () throws -> String)? = nil
     ) {
         self.accountSession = accountSession
         self.urlSession = urlSession
         self.legacyKeyProvider = legacyKeyProvider
+        self.claimKeyProvider = claimKeyProvider
+        self.deviceIdProvider = deviceIdProvider ?? {
+            let identity = try DeviceIdentity.loadOrCreate(keychain: accountSession.keychain)
+            return identity.registeredDeviceId ?? identity.registration.identifier
+        }
     }
 
     // MARK: Preferences host
@@ -74,6 +89,97 @@ public struct ESClient: Sendable {
         )
         let envelope = try decode(LegacyEnvelope<[CollectionSummary]>.self, from: data, http: http)
         return envelope.data ?? []
+    }
+
+    // MARK: Audio download (issue 09)
+
+    /// One call hides the whole download chain (notes/04): the signed-URL POST
+    /// with the standard legacy headers, matching the response entry by
+    /// (region, gcsKey), the auth-free GCS V4 GET, and exactly ONE internal
+    /// re-sign-and-retry when GCS answers 403 (expired signature — signUrls
+    /// live ~1 h and are never persisted). GCS 404 (object gone) and transport
+    /// failures surface as `httpStatus`/`requestFailed`.
+    public func downloadAudio(for file: CardFile) async throws -> Data {
+        do {
+            return try await fetchAuthFree(try await signedURL(for: file))
+        } catch ESError.httpStatus(403, _, _) {
+            return try await fetchAuthFree(try await signedURL(for: file))
+        }
+    }
+
+    /// POST `storage/card/v1/files` — plaintext JSON (no write envelope) with
+    /// the same three auth headers as every legacy call, strict on the code
+    /// like `fetchCardPage`.
+    private func signedURL(for file: CardFile) async throws -> URL {
+        let body = try JSONEncoder().encode(CardFilesRequest(files: [file]))
+        let (data, http) = try await performRecords(
+            path: "storage/card/v1/files",
+            httpMethod: "POST",
+            body: body
+        )
+        let envelope = try decode(LegacyEnvelope<[SignedCardFileWire]>.self, from: data, http: http)
+        guard envelope.code == "00000" else {
+            throw ESError.httpStatus(http.statusCode, code: envelope.code, message: envelope.msg)
+        }
+        guard let entry = (envelope.data ?? [])
+            .first(where: { $0.region == file.region && $0.gcsKey == file.gcsKey }),
+              let signString = entry.signUrl,
+              let signURL = URL(string: signString)
+        else {
+            throw ESError.invalidResponse(
+                "storage/card/v1/files returned no signed URL for \(file.gcsKey ?? "?") in \(file.region ?? "?")"
+            )
+        }
+        return signURL
+    }
+
+    /// Plain GET on a server-signed GCS URL. MUST NOT go through
+    /// perform/performRecords — they attach Authorization, which GCS rejects;
+    /// the V4 signature is in the URL itself.
+    private func fetchAuthFree(_ url: URL) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        let (data, http) = try await send(request)
+        guard (200..<300).contains(http.statusCode) else {
+            // 401 has already passed send()'s refresh passthrough; for GCS it
+            // is simply a failure like any other status.
+            throw ESError.httpStatus(http.statusCode, code: nil, message: String(data: data, encoding: .utf8))
+        }
+        return data
+    }
+
+    // MARK: Card updates (issue 10)
+
+    /// POST `storage/card/v1/update` — pushes the Record's FULL edited
+    /// `client_request_response` (the server replaces it wholesale; notes/04).
+    /// The write envelope is built here and nowhere else: a fresh 32-byte AES
+    /// key per request, outer payload = AES(deviceId), cipherKey =
+    /// RSA(base64(aesKey), claimKey), per-card payload = AES(String(size)) with
+    /// the sum of the payload's RECORDING metadata sizes, and clientUpdateTime
+    /// derived from `record.updatedAt` (last-write-wins with the phone app is
+    /// the server's documented behaviour). Strict on the envelope code; the
+    /// response BODY is advisory — after code "00000" a Card we can decode is
+    /// returned, else nil, because a surprising body must never fail a write
+    /// that succeeded.
+    public func updateCard(_ record: Record) async throws -> Card? {
+        let envelope = try WriteEnvelope.make(
+            deviceId: try deviceIdProvider(),
+            claimKey: try claimKeyProvider()
+        )
+        let body = try JSONEncoder().encode(CardUpdateRequest(record: record, envelope: envelope))
+        let (data, http) = try await performRecords(
+            path: "storage/card/v1/update",
+            httpMethod: "POST",
+            body: body
+        )
+        let strict = try decode(LegacyEnvelope<EmptyData>.self, from: data, http: http)
+        guard strict.code == "00000" else {
+            throw ESError.httpStatus(http.statusCode, code: strict.code, message: strict.msg)
+        }
+        guard let advisory = try? JSONDecoder().decode(LegacyEnvelope<[Card]>.self, from: data) else {
+            return nil
+        }
+        return (advisory.data ?? []).first { $0.cardId == record.id }
     }
 
     // MARK: Request plumbing
@@ -172,3 +278,61 @@ public struct ESClient: Sendable {
 
 /// Decoding helper for envelopes whose `data` we do not model.
 private struct EmptyData: Decodable {}
+
+/// Request body of `storage/card/v1/files` (notes/04): plaintext JSON.
+private struct CardFilesRequest: Encodable {
+    let files: [CardFile]
+}
+
+/// One `data` entry of the `storage/card/v1/files` response.
+private struct SignedCardFileWire: Decodable {
+    let region: String?
+    let gcsKey: String?
+    let signUrl: String?
+}
+
+/// Wire body of `storage/card/v1/update` (notes/04 §2). `clientVersion` is
+/// pinned to 2, matching the account's existing cards. Despite the envelope,
+/// the card content itself travels in cleartext inside `cards` — only the
+/// deviceId and each card's size string are encrypted.
+struct CardUpdateRequest: Encodable {
+    struct CardEntry: Encodable {
+        let cardId: String
+        let clientRequestResponse: String
+        let files: [CardFile]
+        let collectionIds: [String]
+        let clientUpdateTime: Int64
+        let payload: String
+        let cipherKey: String
+
+        enum CodingKeys: String, CodingKey {
+            case cardId
+            case clientRequestResponse = "client_request_response"
+            case files, collectionIds, clientUpdateTime, payload, cipherKey
+        }
+    }
+
+    let payload: String
+    let cipherKey: String
+    let clientVersion: Int
+    let cards: [CardEntry]
+
+    init(record: Record, envelope: WriteEnvelope) throws {
+        payload = envelope.devicePayload
+        cipherKey = envelope.cipherKey
+        clientVersion = 2
+        cards = [
+            CardEntry(
+                cardId: record.id,
+                clientRequestResponse: record.clientRequestResponse,
+                files: record.files,
+                collectionIds: record.collectionIds,
+                clientUpdateTime: Int64(record.updatedAt.timeIntervalSince1970 * 1000),
+                payload: try envelope.sealed(
+                    String(CardDocument.recordingSizeBytes(of: record.clientRequestResponse))
+                ),
+                cipherKey: envelope.cipherKey
+            )
+        ]
+    }
+}

@@ -45,7 +45,9 @@ public struct Card: Decodable, Equatable, Sendable {
     }
 }
 
-public struct CardFile: Decodable, Equatable, Sendable {
+/// One cloud file of a Card: the (region, gcsKey) pair every files-endpoint call
+/// is keyed on. Encodable so it rides the update body and the offline cache.
+public struct CardFile: Decodable, Encodable, Equatable, Sendable {
     public let region: String?
     public let gcsKey: String?
 }
@@ -272,7 +274,16 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
     public let transcript: String?
     public let audioDurationMS: Int64?
     public let audioSizeBytes: Int64?
-    public let audioGcsKey: String?
+    /// The EXACT `client_request_response` string this Record was decoded from.
+    /// The server replaces that string wholesale on update, so edits operate on
+    /// it surgically (CardDocument) — a Record never rebuilds it from domain.
+    public let clientRequestResponse: String
+    /// ALL of the Card's files with their regions — what `storage/card/v1/update`
+    /// echoes back as `files`, and the pool the audio download signs from.
+    public let files: [CardFile]
+    /// THE audio file, derived once in init: the RECORDING resource's remote pair,
+    /// else the first Card file with a usable gcsKey. nil = no audio to download.
+    public let audioFile: CardFile?
     /// The recording's main topics (the phone app's "Main topic" section).
     public let mainTopics: [MainTopic]
     /// One-line tone summary (`MEETING_EMOTIONAL_SUMMARY`, a plain string).
@@ -308,8 +319,35 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
         }.joined(separator: "\n\n")
     }
 
+    /// The Record as it reads after `edit` — the optimistic local state AND the
+    /// push payload in one value. Re-enters the same `init(card:)` as a fresh
+    /// decode via a synthetic Card, so an edited Record and a decoded Record can
+    /// never diverge in shape; `updatedAt` is stamped to `now`, the same clock
+    /// the update request's `clientUpdateTime` derives from.
+    public func applying(_ edit: CardTextEdit, now: Date = Date()) throws -> Record {
+        let document = try CardDocument(rawJSON: clientRequestResponse).applying(edit)
+        return try Record(
+            card: Card(
+                cardId: id,
+                clientRequestResponse: document.rawJSON,
+                files: files.isEmpty ? nil : files,
+                clientCreateTime: nil,
+                clientUpdateTime: nil,
+                clientVersion: nil
+            ),
+            updatedAtStamp: now
+        )
+    }
+
     /// Double-decodes a Card: the outer JSON, then the JSON-encoded `client_request_response`.
+    /// The raw string is retained verbatim alongside its typed projection.
     public init(card: Card) throws {
+        try self.init(card: card, updatedAtStamp: nil)
+    }
+
+    /// The single Card → Record authority. `updatedAtStamp` is the one field an
+    /// edit legitimately owns (see `applying`); every other derivation is shared.
+    init(card: Card, updatedAtStamp: Date?) throws {
         guard let payloadData = card.clientRequestResponse.data(using: .utf8) else {
             throw ESError.invalidResponse("Card \(card.cardId) has an undecodable client_request_response")
         }
@@ -319,7 +357,11 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
         title = payload.cards.title?.isEmpty == false ? payload.cards.title! : "Untitled Record"
         summary = payload.cards.summary
         createdAt = Date(epochMilliseconds: payload.cards.createTime ?? card.clientCreateTime ?? 0)
-        updatedAt = Date(epochMilliseconds: payload.cards.updateTime ?? card.clientUpdateTime ?? 0)
+        updatedAt = updatedAtStamp
+            ?? Date(epochMilliseconds: payload.cards.updateTime ?? card.clientUpdateTime ?? 0)
+        clientRequestResponse = card.clientRequestResponse
+        files = card.files ?? []
+        audioFile = Record.audioFile(of: payload, cardFiles: files)
 
         let transcription = payload.cardResources.first { $0.rawType == .transcription }
         transcript = transcription?.data?.isEmpty == false ? transcription?.data : nil
@@ -333,9 +375,6 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
             audioDurationMS = nil
             audioSizeBytes = nil
         }
-        audioGcsKey = recording?.remoteGcsKey?.isEmpty == false
-            ? recording?.remoteGcsKey
-            : card.files?.first?.gcsKey
 
         var topics: [MainTopic] = []
         var emotional: String?
@@ -355,6 +394,17 @@ public struct Record: Identifiable, Equatable, Sendable, Codable {
         collectionIds = (payload.cardCollectionCrossRefs ?? [])
             .compactMap(\.collectionId)
             .filter { !$0.isEmpty }
+    }
+
+    /// The audio file's (region, gcsKey) pair: the RECORDING resource's remote pair
+    /// when it carries a non-empty key, else the first Card file that does.
+    private static func audioFile(of payload: CardPayload, cardFiles: [CardFile]) -> CardFile? {
+        for resource in payload.cardResources where resource.rawType == .recording {
+            if let key = resource.remoteGcsKey, !key.isEmpty {
+                return CardFile(region: resource.remoteRegion, gcsKey: key)
+            }
+        }
+        return cardFiles.first { $0.gcsKey?.isEmpty == false }
     }
 
     /// `metadata` is `{"title": …, "content": …}` (or `detailed_summary`); a plain
@@ -389,6 +439,12 @@ public struct MainTopic: Identifiable, Equatable, Sendable, Codable {
     public let id: String
     public let title: String
     public let content: String?
+
+    public init(id: String, title: String, content: String?) {
+        self.id = id
+        self.title = title
+        self.content = content
+    }
 }
 
 extension Date {

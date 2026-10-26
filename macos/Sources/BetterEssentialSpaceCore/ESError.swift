@@ -12,6 +12,11 @@ public enum ESError: Error, Equatable {
     case hostUnauthorized(String)
     case missingLegacyAPIKey(String)
     case missingAccountSigningKey(String)
+    /// The disk-only claim key that card writes need is absent or empty. Unlike
+    /// the two app keys there is no bundled fallback (issue 10).
+    case missingClaimKey(String)
+    /// The claim-key file exists but does not contain a readable RSA public key.
+    case invalidClaimKey(String)
     case keychainFailure(OSStatus)
     case invalidTokenFile(String)
     case invalidResponse(String)
@@ -30,6 +35,10 @@ public enum ESError: Error, Equatable {
             return "The legacy API key override at \(path) is empty. Delete the file to use the bundled key, or write the new records-host key into it."
         case .missingAccountSigningKey(let path):
             return "The account signing key override at \(path) is empty. Delete the file to use the bundled key, or write the new key into it."
+        case .missingClaimKey(let path):
+            return "The claim key at \(path) is missing or empty. Editing a Record needs it — save the RSA claim key (base64, PEM wrapping tolerated) into that file."
+        case .invalidClaimKey(let path):
+            return "The claim key at \(path) is not a readable RSA public key. Replace the file's contents with the base64 claim-key value."
         case .keychainFailure(let status):
             return "Keychain error (OSStatus \(status))."
         case .invalidTokenFile(let detail):

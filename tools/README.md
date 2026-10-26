@@ -28,6 +28,10 @@ mitmdump -nr captures/<file>.flow -s tools/mitmdump-dump-recent-flows.py --set f
 - `mitmdump-dump-recent-flows.py` — one JSONL line per recent flow (method/host/path/status/truncated auth) → `/tmp/flow_recent.jsonl`.
 - `mitmdump-dump-auth-bodies.py` — request/response bodies for account.nothing.tech auth endpoints → `/tmp/flow_bodies.jsonl` (contains tokens — file stays local, never commit).
 
+## Live API probes
+
+- `es-write-path-test.py` — proves the legacy-host card write envelope end to end against production: create → update (title/summary) → verify by list read-back → trash → hard delete one scratch card it creates itself. Needs `secrets/es_token.json`, `secrets/es_legacy_apikey.txt`, `secrets/es_config_dump.json` (claimKey). The recipe is in `notes/04-audio-download-and-card-writes.md`.
+
 ## Legacy patch-pipeline helpers
 
 - `DexFilter.java`, `dex_filter.py` — framework.jar dex filtering used while building the `nt-services.jar` boot-classpath stub (procedure in `notes/02` §"Emulator capture stack").

@@ -50,4 +50,23 @@ final class RecordCacheTests: XCTestCase {
         try Data("not json".utf8).write(to: corrupt)
         XCTAssertNil(RecordCache.load(from: corrupt))
     }
+
+    /// One-time cache bump: `clientRequestResponse` became non-optional, so a
+    /// snapshot written before the field existed fails to decode — which the
+    /// loader treats as "no cache". The next launch re-fetches from the network.
+    func testSnapshotWithoutClientRequestResponseIsNoCache() throws {
+        let oldRecordJSON = """
+        {"id":"c1","title":"t","summary":null,"createdAt":700000000000,"updatedAt":700000000000,
+         "transcript":null,"audioDurationMS":null,"audioSizeBytes":null,"audioGcsKey":"k",
+         "mainTopics":[],"emotionalSummary":null,"speakers":[],"collectionIds":[]}
+        """
+        let snapshotJSON = """
+        {"accountUUID":"u-1","savedAt":700000000000,"records":[\(oldRecordJSON)],"collections":[]}
+        """
+        let url = temporaryCacheURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(snapshotJSON.utf8).write(to: url)
+
+        XCTAssertNil(RecordCache.load(from: url))
+    }
 }

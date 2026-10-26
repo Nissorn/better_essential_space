@@ -4,7 +4,7 @@ Resolves the open question from notes/02 ("where do the account's actual records
 
 ## TL;DR
 
-Records are **Cards on the legacy host** (`essential-space.nothingtech.link`), NOT the `memories/*` API. The account JWT works there — but only with a third header, `auth: md5(apiKey + timestamp)`, which jadx analysis had missed (it lives in a second OkHttp interceptor, `NothingApiManager.b`, not in `ag.java`). Transcripts are **inline** in the card list response. Audio files sit in Firebase Storage (`gs://essential-space-gcs-asia-south1`) behind a token chain that currently 403s for non-genuine clients → audio playback deferred (spec allows).
+Records are **Cards on the legacy host** (`essential-space.nothingtech.link`), NOT the `memories/*` API. The account JWT works there — but only with a third header, `auth: md5(apiKey + timestamp)`, which jadx analysis had missed (it lives in a second OkHttp interceptor, `NothingApiManager.b`, not in `ag.java`). Transcripts are **inline** in the card list response. Audio files sit in Firebase Storage (`gs://essential-space-gcs-asia-south1`) behind a token chain that currently 403s for non-genuine clients → audio playback deferred (spec allows). **(2026-10-26: deferred verdict overturned — downloads go through `storage/card/v1/files` signUrls, see notes/04.)**
 
 ## The read recipe (verified live, HTTP 200, from the Mac)
 
@@ -79,6 +79,8 @@ Facts established:
 Conclusion for v1: transcripts are fully served by the card list alone; **audio playback deferred** (explicitly allowed by spec Q13). Follow-up hypotheses for a later issue: Firebase Storage rules requiring Play Integrity/App Check attestation; download-token URLs; recorder-app dependency on-device; or authenticated Cognito identities for S3.
 
 ### Update (2026-10-25, later session): the cloud copy is upload-only — playback is local, audio playback is not feasible today
+
+**SUPERSEDED 2026-10-26 (session 4) — the "no download path exists" verdict was wrong: it audited only the upload utilities (`FirebaseUtil`/`CloudStorageUtil`/`AmplifyUtil`) and missed `data/work/sync/RemoteFileDownloader`, which fetches server-signed GCS URLs from `storage/card/v1/files` and downloads the audio with plain OkHttp. Full working recipe (verified live, 9.7 MB MP4 downloaded): notes/04-audio-download-and-card-writes.md.** The per-app facts below (ES `FirebaseUtil` upload-only, recorder app transcription-only, emulator playback = local file) remain correct; only the final verdict is dead.
 
 Decompiled `EssentialRecorder.apk` (`apks/ntessentialrecorder/` → `apks/ntessentialrecorder/jadx-out/`) and re-audited the ES app; this closes the follow-up hypotheses above:
 
