@@ -34,7 +34,16 @@ struct AudioCardView: View {
 
             case .downloading(let progress):
                 HStack(spacing: 12) {
-                    ProgressView(value: progress)
+                    // Two views, not one with an optional value: AppKit's
+                    // progress indicator stays indeterminate when a live
+                    // ProgressView gains a value.
+                    if let progress {
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
                     Text(progress.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "Downloading…")
                         .font(ND.mono(12))
                         .monospacedDigit()
